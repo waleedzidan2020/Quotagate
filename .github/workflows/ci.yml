@@ -12,7 +12,7 @@ jobs:
       - name: Python compile
         run: python3 -m compileall -q app
       - name: Python import smoke test
-        run: python3 -c "import app; import app.shaping; import app.diagnostics; import app.guestmode; import app.shaping_policy"
+        run: python3 -c "import app; import app.shaping; import app.diagnostics; import app.guestmode; import app.shaping_policy; import app.dnsproxy"
       - name: Guest speed policy semantics
         run: |
           python3 - <<'PY'
@@ -29,23 +29,39 @@ jobs:
           assert guestmode._role({}, 'aa:bb:cc:dd:ee:ff', set()) == 'unassigned'
           print('guest policy semantics: OK')
           PY
-      - name: Shaping device safety semantics
+      - name: Shaping and firewall device safety semantics
         run: |
           python3 - <<'PY'
           from app import shaping_policy
           devices = [
-              {'id':1,'ip':'192.168.2.10','mac':'aa:bb:cc:dd:ee:01','last_seen':10,'enabled':1},
-              {'id':2,'ip':'192.168.2.10','mac':'00:00:00:00:00:00','last_seen':99,'enabled':1},
-              {'id':3,'ip':'192.168.2.10','mac':'aa:bb:cc:dd:ee:03','last_seen':20,'enabled':1},
-              {'id':4,'ip':'192.168.2.11','mac':'aa:bb:cc:dd:ee:04','last_seen':5,'enabled':1},
-              {'id':5,'ip':'not-an-ip','mac':'aa:bb:cc:dd:ee:05','last_seen':50,'enabled':1},
+              {'id':1,'ip':'192.168.2.10','mac':'aa:bb:cc:dd:ee:01','last_seen':10,'enabled':0,'blocked_manual':1},
+              {'id':2,'ip':'192.168.2.10','mac':'00:00:00:00:00:00','last_seen':99,'enabled':0,'blocked_manual':1},
+              {'id':3,'ip':'192.168.2.10','mac':'aa:bb:cc:dd:ee:03','last_seen':20,'enabled':1,'blocked_manual':0},
+              {'id':4,'ip':'192.168.2.11','mac':'aa:bb:cc:dd:ee:04','last_seen':5,'enabled':1,'blocked_manual':0},
+              {'id':5,'ip':'not-an-ip','mac':'aa:bb:cc:dd:ee:05','last_seen':50,'enabled':1,'blocked_manual':0},
           ]
+          shaping_policy._neighbor_map=lambda:{'192.168.2.10':'aa:bb:cc:dd:ee:03'}
+          shaping_policy.db.mac_rules=lambda:[]
           safe = shaping_policy._sanitize_devices(devices)
           assert [d['id'] for d in safe] == [3, 4]
           assert shaping_policy._valid_mac('aa:bb:cc:dd:ee:ff')
           assert not shaping_policy._valid_mac('00:00:00:00:00:00')
           assert not shaping_policy._valid_mac('ff:ff:ff:ff:ff:ff')
-          print('shaping device safety: OK')
+          blocked=shaping_policy.blocked({'bundle':{'total_gb':100}},[],devices)
+          assert '192.168.2.10' not in blocked
+          print('shaping/firewall device safety: OK')
+          PY
+      - name: DNS fallback semantics
+        run: |
+          python3 - <<'PY'
+          from app import dnsproxy
+          c={'network':{'uplink_net':'192.168.1.0/24','upstream_dns':['1.1.1.1','8.8.8.8']},'dns':{}}
+          assert dnsproxy._uplink_gateway(c)=='192.168.1.1'
+          assert dnsproxy.upstreams(c)==['1.1.1.1','8.8.8.8','192.168.1.1']
+          c['network']['dns_fallback']='192.168.50.1'
+          assert dnsproxy._uplink_gateway(c)=='192.168.50.1'
+          assert dnsproxy.error_reply(b'\x12\x34'+b'\x00'*10,2)[:2]==b'\x12\x34'
+          print('dns fallback safety: OK')
           PY
       - name: JavaScript syntax
         run: |

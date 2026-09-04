@@ -10,6 +10,7 @@
     "pool_start": "192.168.2.100",
     "pool_end": "192.168.2.200",
     "upstream_dns": ["1.1.1.1", "8.8.8.8"],
+    "dns_fallback": "192.168.1.1",
     "line_down_mbit": 12.0,
     "line_up_mbit": 1.5,
     "vpn_share": false,
