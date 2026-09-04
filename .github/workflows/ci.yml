@@ -12,10 +12,12 @@ jobs:
       - name: Python compile
         run: python3 -m compileall -q app
       - name: Python import smoke test
-        run: python3 -c "import app; import app.shaping; import app.diagnostics"
+        run: python3 -c "import app; import app.shaping; import app.diagnostics; import app.guestmode"
       - name: JavaScript syntax
         run: |
           node --check web/app.js
+          node --check web/app-core.js
+          node --check web/guest-mode.js
           node --check web/guest-shaping.js
       - name: Shell syntax
         run: |
