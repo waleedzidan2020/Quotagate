@@ -7,7 +7,7 @@ async function api(path,data=null){
   if(!r.ok) throw Error(j.error||('HTTP '+r.status)); return j;
 }
 function fmt(b){b=Number(b||0);for(const u of ['B','KB','MB','GB','TB']){if(b<1024)return b.toFixed(u==='B'?0:2)+' '+u;b/=1024}return b.toFixed(2)+' PB'}
-function esc(s){return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
+function esc(s){return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot',"'":'&#39;'}[m]))}
 async function login(){try{await api('/api/login',{password:$('pw').value,totp:$('totp').value});$('login').hidden=true;$('app').hidden=false;await refreshAll()}catch(e){$('loginErr').textContent=e.message}}
 async function refreshAll(){S=await api('/api/status');render();}
 function render(){
@@ -34,11 +34,24 @@ function deviceMini(d){return `<div class="row" style="padding:7px 0;border-top:
 function renderDevices(){
  const un=S.devices.filter(d=>!d.user_id);$('devices').innerHTML=un.map(d=>`<div class="card device"><h3>${esc(d.name)}</h3><div>${esc(d.ip)}</div><small>${esc(d.mac)} ${esc(d.manufacturer||'')}</small><div class="row"><span class="pill ${d.enabled?'ok':'bad'}">${d.enabled?'Enabled':'Disabled'}</span>${d.is_guest?'<span class="pill">Guest</span>':''}</div><button onclick='editDevice(${d.id})'>إدارة</button></div>`).join('')||'<div class="muted">لا توجد أجهزة غير مخصصة.</div>';
 }
-function renderSettings(){const n=S.network,b=S.bundle;
+function renderSettings(){const n=S.network,b=S.bundle,w=S.wifi||{};
  $('bundleGb').value=b.total_gb;$('resetDay').value=b.reset_day;$('lineDown').value=n.line_down_mbit;$('lineUp').value=n.line_up_mbit;$('stopNew').checked=!!n.stop_new_connections;$('declineRandom').checked=!!n.decline_random_macs;$('vpnShare').checked=!!n.vpn_share;$('vpnIface').value=n.vpn_interface||'tun0';
+ $('wifiSsid').value=w.ssid||'';$('wifiPassword').value='';$('wifiHidden').checked=!!w.hidden;$('wifiState').textContent=w.hidden?'الشبكة مخفية':'الشبكة ظاهرة';$('wifiPasswordState').textContent=w.password_set?'كلمة المرور محفوظة':'كلمة المرور غير مضبوطة';
  fetch('/api/settings').then(r=>r.json()).then(c=>{if(c.guest){$('guestEnabled').checked=!!c.guest.enabled;$('guestQuota').value=c.guest.quota_gb;$('guestDown').value=c.guest.speed_down_kbit;$('guestUp').value=c.guest.speed_up_kbit}})
 }
 async function saveNetwork(){try{await api('/api/settings',{bundle:{total_gb:+$('bundleGb').value,reset_day:+$('resetDay').value},network:{line_down_mbit:+$('lineDown').value,line_up_mbit:+$('lineUp').value,stop_new_connections:$('stopNew').checked,decline_random_macs:$('declineRandom').checked,vpn_share:$('vpnShare').checked,vpn_interface:$('vpnIface').value},guest:{enabled:$('guestEnabled').checked,quota_gb:+$('guestQuota').value,speed_down_kbit:+$('guestDown').value,speed_up_kbit:+$('guestUp').value}});await refreshAll();alert('تم الحفظ')}catch(e){alert(e.message)}}
+async function saveWifi(){
+ const ssid=$('wifiSsid').value.trim(),password=$('wifiPassword').value,hidden=$('wifiHidden').checked;
+ if(!ssid){modal('<h3>خطأ</h3><p class="bad">اسم شبكة Wi-Fi لا يمكن أن يكون فارغاً.</p>');return}
+ if(password && (new TextEncoder().encode(password).length<8 || new TextEncoder().encode(password).length>63)){modal('<h3>خطأ</h3><p class="bad">كلمة مرور Wi-Fi يجب أن تكون بين 8 و63 بايت.</p>');return}
+ if(!confirm('تغيير إعدادات Wi-Fi قد يفصل الأجهزة المتصلة مؤقتاً. هل تريد المتابعة؟'))return;
+ try{
+   const j=await api('/api/wifi',{ssid,password,hidden});
+   $('wifiPassword').value='';
+   if(S&&j.wifi)S.wifi=j.wifi;
+   modal(`<h3>تم حفظ إعدادات Wi-Fi</h3><p>سيتم إعادة تشغيل نقطة الوصول فقط. قد ينقطع اتصال هذا الجهاز لثوانٍ.</p><div class="row"><span class="pill">SSID: ${esc(ssid)}</span><span class="pill">${hidden?'مخفية':'ظاهرة'}</span></div>`);
+ }catch(e){modal(`<h3>تعذر حفظ إعدادات Wi-Fi</h3><p class="bad">${esc(e.message)}</p>`)}
+}
 function showAddUser(){modal(`<h2>مستخدم جديد</h2><label>الاسم<input id="mName"></label><label>نوع الحصة<select id="mMode"><option value="fixed">Fixed</option><option value="shared">Equal share</option></select></label><label>Quota GB<input id="mQuota" type="number" step="0.1" value="5"></label><label>Download kbit<input id="mDown" type="number" value="0"></label><label>Upload kbit<input id="mUp" type="number" value="0"></label><button onclick="addUser()">إنشاء</button>`)}
 async function addUser(){await api('/api/users',{name:$('mName').value,quota_mode:$('mMode').value,quota_gb:+$('mQuota').value,speed_down_kbit:+$('mDown').value,speed_up_kbit:+$('mUp').value});closeModal();refreshAll()}
 function editUser(id){const u=S.users.find(x=>x.id===id);modal(`<h2>تعديل ${esc(u.name)}</h2><label>الاسم<input id="mName" value="${esc(u.name)}"></label><label>الحصة<select id="mMode"><option value="fixed" ${u.quota_mode==='fixed'?'selected':''}>Fixed</option><option value="shared" ${u.quota_mode==='shared'?'selected':''}>Equal share</option></select></label><label>Quota<input id="mQuota" type="number" step="0.1" value="${u.quota_gb}"></label><label>Down kbit<input id="mDown" type="number" value="${u.speed_down_kbit}"></label><label>Up kbit<input id="mUp" type="number" value="${u.speed_up_kbit}"></label><label><input id="mEx" type="checkbox" ${u.exempt?'checked':''}> Exempt</label><label><input id="mEn" type="checkbox" ${u.enabled?'checked':''}> Enabled</label><button onclick="saveUser(${id})">حفظ</button>`)}
