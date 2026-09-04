@@ -26,7 +26,24 @@ def session(h):
     return False
 
 def mask_config(c):
-    x=json.loads(json.dumps(c)); x['admin']['password_hash']='***'; x['admin']['totp_secret']='***'; x['wifi']['passphrase']='***'; x['wan']['pppoe_password']='***'; return x
+    x=json.loads(json.dumps(c))
+    x['admin']['password_hash']='***'; x['admin']['totp_secret']='***'; x['wan']['pppoe_password']='***'
+    password_set=bool(x['wifi'].pop('passphrase',''))
+    x['wifi']['password_set']=password_set
+    return x
+
+def wifi_view(c):
+    w=c['wifi']
+    return {'ssid':w.get('ssid',''),'hidden':bool(w.get('hidden',False)),'password_set':bool(w.get('passphrase',''))}
+
+def restart_wifi_after_save(c):
+    time.sleep(1.0)
+    try:
+        network.restart_wifi(c)
+        db.event('Wi-Fi settings applied and hostapd restarted','info')
+    except Exception as e:
+        db.event('Wi-Fi restart failed: '+str(e),'error')
+        db.alert('wifi-restart-failed','Wi-Fi settings were saved but hostapd failed to restart')
 
 def quota_view(c, users):
     out=[]
@@ -125,7 +142,7 @@ class Handler(SimpleHTTPRequestHandler):
         c=config.load()
         if p=='/api/status':
             us=quota_view(c,db.users()); ds=db.devices(); used=sum(int(u.get('usage_bytes') or 0) for u in us)
-            return self.json({'users':us,'devices':ds,'events':db.events(80),'alerts':db.alerts(50),'daily':db.daily(),'bundle':{**c['bundle'],'used_bytes':used},'network':c['network'],'wifi':{'ssid':c['wifi']['ssid']},'web':c['web'],'mac_rules':db.mac_rules(),'system':system_info(c)})
+            return self.json({'users':us,'devices':ds,'events':db.events(80),'alerts':db.alerts(50),'daily':db.daily(),'bundle':{**c['bundle'],'used_bytes':used},'network':c['network'],'wifi':wifi_view(c),'web':c['web'],'mac_rules':db.mac_rules(),'system':system_info(c)})
         if p=='/api/settings': return self.json(mask_config(c))
         if p=='/api/dns/rules': return self.json({'rules':db.dns_rules()})
         if p=='/api/dns/history':
@@ -174,6 +191,19 @@ class Handler(SimpleHTTPRequestHandler):
                 for sec in ('bundle','network','guest','features','security'):
                     if sec in d and isinstance(d[sec],dict): c[sec].update(d[sec])
                 config.save(c); network.runtime(c); apply(c); return self.json({'ok':True})
+            if p=='/api/wifi':
+                w=dict(c['wifi'])
+                if 'ssid' in d: w['ssid']=str(d.get('ssid',''))
+                if 'hidden' in d:
+                    if not isinstance(d['hidden'],bool): raise ValueError('hidden must be true or false')
+                    w['hidden']=d['hidden']
+                new_pw=d.get('password',None)
+                if new_pw is not None and str(new_pw)!='': w['passphrase']=str(new_pw)
+                network.validate_wifi_settings(w)
+                c['wifi']=w; config.save(c)
+                snapshot=json.loads(json.dumps(c))
+                threading.Thread(target=restart_wifi_after_save,args=(snapshot,),daemon=True).start()
+                return self.json({'ok':True,'wifi_restart':True,'wifi':wifi_view(c)})
             if p=='/api/password':
                 pw=str(d.get('password',''))
                 if len(pw)<8:return self.json({'error':'8+ chars required'},400)
