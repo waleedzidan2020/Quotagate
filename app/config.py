@@ -25,24 +25,21 @@ DEFAULT={
 def merge(a,b):
     out=dict(a)
     for k,v in b.items():
-        if isinstance(v,dict) and isinstance(out.get(k),dict): out[k]=merge(out[k],v)
-        else: out[k]=v
+        if isinstance(v,dict) and isinstance(out.get(k),dict):out[k]=merge(out[k],v)
+        else:out[k]=v
     return out
 
 def load():
     if not CFG.exists():
-        CFG.parent.mkdir(parents=True,exist_ok=True,mode=0o700); os.chmod(CFG.parent,0o700); save(DEFAULT); return json.loads(json.dumps(DEFAULT))
-    try: data=json.loads(CFG.read_text())
-    except Exception: data={}
-    return merge(DEFAULT,data)
+        CFG.parent.mkdir(parents=True,exist_ok=True,mode=0o700);os.chmod(CFG.parent,0o700);save(DEFAULT);return json.loads(json.dumps(DEFAULT))
+    try:data=json.loads(CFG.read_text())
+    except Exception:data={}
+    out=merge(DEFAULT,data);out['version']=DEFAULT['version'];return out
 
 def save(c):
-    CFG.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
-    os.chmod(CFG.parent,0o700)
-    tmp=CFG.with_suffix('.tmp')
-    data=json.dumps(c,indent=2,ensure_ascii=False)+'\n'
+    CFG.parent.mkdir(parents=True,exist_ok=True,mode=0o700);os.chmod(CFG.parent,0o700);c=dict(c);c['version']=DEFAULT['version'];tmp=CFG.with_suffix('.tmp');data=json.dumps(c,indent=2,ensure_ascii=False)+'\n'
     with open(tmp,'w',encoding='utf-8') as f:
-        f.write(data); f.flush()
-        try: os.fsync(f.fileno())
-        except OSError: pass
-    os.chmod(tmp,0o600); os.replace(tmp,CFG)
+        f.write(data);f.flush()
+        try:os.fsync(f.fileno())
+        except OSError:pass
+    os.chmod(tmp,0o600);os.replace(tmp,CFG)
