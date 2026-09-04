@@ -49,11 +49,36 @@ def ensure_lan(c):
     try: Path('/proc/sys/net/ipv4/ip_forward').write_text('1')
     except Exception: pass
 
+def validate_wifi_settings(w):
+    ssid=str(w.get('ssid',''))
+    if not ssid: raise ValueError('Wi-Fi SSID must not be empty')
+    if any(ord(ch)<32 or ord(ch)==127 for ch in ssid):
+        raise ValueError('Wi-Fi SSID contains unsupported control characters')
+    if len(ssid.encode('utf-8'))>32:
+        raise ValueError('Wi-Fi SSID must be at most 32 bytes')
+    pw=str(w.get('passphrase',''))
+    if not 8<=len(pw.encode('utf-8'))<=63:
+        raise ValueError('Wi-Fi password must be 8..63 bytes')
+    if any(ch in '\r\n' for ch in pw):
+        raise ValueError('Wi-Fi password contains unsupported characters')
+    return ssid,pw,bool(w.get('hidden',False))
+
 def write_hostapd(c):
     w=c['wifi']; n=c['network']
-    pw=str(w['passphrase'])
-    if not 8<=len(pw)<=63: raise RuntimeError('Wi-Fi password must be 8..63 chars')
-    text=f'''interface={n['lan_interface']}\ndriver=nl80211\nssid={str(w['ssid'])[:32]}\nhw_mode={w.get('hw_mode','g')}\nchannel={int(w.get('channel',1))}\nauth_algs=1\nwpa=2\nwpa_key_mgmt=WPA-PSK\nwpa_pairwise=CCMP\nwpa_passphrase={pw}\n'''
+    ssid,pw,hidden=validate_wifi_settings(w)
+    text=(
+        f"interface={n['lan_interface']}\n"
+        "driver=nl80211\n"
+        f"ssid={ssid}\n"
+        f"hw_mode={w.get('hw_mode','g')}\n"
+        f"channel={int(w.get('channel',1))}\n"
+        "auth_algs=1\n"
+        "wpa=2\n"
+        "wpa_key_mgmt=WPA-PSK\n"
+        "wpa_pairwise=CCMP\n"
+        f"wpa_passphrase={pw}\n"
+        f"ignore_broadcast_ssid={1 if hidden else 0}\n"
+    )
     runtime=Path('/run/quotagate'); runtime.mkdir(parents=True,exist_ok=True,mode=0o700)
     target=runtime/'hostapd.conf'; target.write_text(text); target.chmod(0o600)
 
@@ -72,6 +97,19 @@ def start_network_daemons(c):
     dm=subprocess.Popen(['dnsmasq','--conf-file=/run/quotagate/dnsmasq.conf','--pid-file=/run/quotagate-dnsmasq.pid'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
     time.sleep(.4)
     return hp.returncode, dm.returncode
+
+def restart_wifi(c):
+    ensure_lan(c)
+    write_hostapd(c)
+    run(['pkill','-F','/run/quotagate-hostapd.pid'])
+    run(['pkill','-f','hostapd.*quotagate|hostapd.*hostapd.conf'])
+    p=run(['hostapd','-B','-P','/run/quotagate-hostapd.pid','/run/quotagate/hostapd.conf'])
+    if p.returncode:
+        raise RuntimeError((p.stderr or p.stdout or 'hostapd failed to restart').strip())
+    time.sleep(.6)
+    if not Path('/run/quotagate-hostapd.pid').exists():
+        raise RuntimeError('hostapd restart did not create its pid file')
+    return True
 
 def stop_network_daemons():
     run(['pkill','-F','/run/quotagate-hostapd.pid']); run(['pkill','-F','/run/quotagate-dnsmasq.pid'])
