@@ -11,7 +11,7 @@ DB=$DATA_DIR/quotagate.db
 LOG_DIR=/var/log/quotagate
 STAGE=/opt/.quotagate.new
 
-echo "=== QuotaGate antiX 3.0 ==="
+echo "=== QuotaGate antiX 3.1 ==="
 echo "Code:   $APP_DIR"
 echo "Config: $CFG"
 echo "Data:   $DB"
@@ -20,7 +20,7 @@ echo "The QuotaGate service intentionally runs as root because it controls nftab
 echo
 
 apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-venv dnsmasq nftables iproute2 kmod hostapd iw ca-certificates openssl curl ppp python3-qrcode python3-pil
+DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-venv dnsmasq nftables iproute2 kmod hostapd iw ca-certificates openssl curl git ppp python3-qrcode python3-pil
 python3 - <<'PY'
 import sys
 assert sys.version_info >= (3,10), 'Python 3.10+ required'
@@ -28,7 +28,7 @@ PY
 
 service quotagate stop >/dev/null 2>&1 || true
 
-install -d -o root -g root -m 0700 "$CFG_DIR" "$CFG_DIR/backup" "$DATA_DIR" "$DATA_DIR/backup"
+install -d -o root -g root -m 0700 "$CFG_DIR" "$CFG_DIR/backup" "$DATA_DIR" "$DATA_DIR/backup" "$DATA_DIR/update-backups"
 install -d -o root -g root -m 0750 "$LOG_DIR"
 install -d -o root -g root -m 0755 /etc/hostapd
 
@@ -112,11 +112,11 @@ if [ "$FRESH_CONFIG" -eq 1 ]; then
 import sys
 from app import auth, config
 ssid,wifi,admin,bundle,reset=sys.argv[1:]
-c=config.load(); c['version']='3.0.0'
+c=config.load(); c['version']='3.1.0'
 c['network'].update(wan_interface='eth0',lan_interface='wlan0',lan_ip='192.168.2.1',lan_prefix=24,client_net='192.168.2.0/24',pool_start='192.168.2.100',pool_end='192.168.2.200',upstream_dns=['1.1.1.1','8.8.8.8'])
-c['wifi'].update(enabled=True,ssid=ssid,passphrase=wifi,channel=1,hw_mode='g')
+c['wifi'].update(enabled=True,ssid=ssid,passphrase=wifi,channel=1,hw_mode='g',hidden=False)
 c['web'].update(host='192.168.2.1',port=8080)
-c['bundle'].update(total_gb=float(bundle),reset_day=int(reset))
+c['bundle'].update(total_gb=float(bundle),reset_day=int(reset),auto_reset=True)
 c['admin']['password_hash']=auth.hash_password(admin)
 config.save(c)
 PY
@@ -160,6 +160,7 @@ install -m755 "$HERE/scripts/diagnose.sh" /usr/local/sbin/quotagate-diagnose
 install -m755 "$HERE/scripts/setup-network.sh" /usr/local/sbin/quotagate-setup-network
 install -m755 "$HERE/scripts/make-cert.sh" /usr/local/sbin/quotagate-make-cert
 install -m755 "$HERE/scripts/pppoe-test.sh" /usr/local/sbin/quotagate-pppoe-test
+install -m755 "$HERE/scripts/update.sh" /usr/local/sbin/quotagate-update
 cat >/etc/logrotate.d/quotagate <<'LOGROTATE'
 /var/log/quotagate/*.log {
     weekly
@@ -179,10 +180,10 @@ sleep 3
 service quotagate status || true
 
 echo
-echo "Installed/updated QuotaGate antiX 3.0."
+echo "Installed/updated QuotaGate antiX 3.1."
 echo "Application code: $APP_DIR"
 echo "Persistent config: $CFG"
 echo "Persistent database: $DB"
 echo "Logs: $LOG_DIR/service.log"
-echo "A future deploy may replace $APP_DIR completely without deleting config, database, or logs."
+echo "Update command: sudo quotagate-update --check ; sudo quotagate-update"
 echo "Diagnostic command: sudo quotagate-diagnose"
