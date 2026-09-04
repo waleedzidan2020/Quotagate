@@ -3,7 +3,11 @@
 # to be upgraded independently and verified on antiX.
 from . import network as _network
 from . import shaping as _shaping
+from . import shaping_compat as _shaping_compat
 
+# antiX can ship an older iproute2 whose `tc ... show` text differs from newer
+# builds. Install a tolerant verifier before the shaping engine is exposed.
+_shaping_compat.install()
 _network.shaping = _shaping.shaping
 _network.clear_shaping = _shaping.clear
 
