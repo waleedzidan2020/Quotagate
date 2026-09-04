@@ -6,11 +6,11 @@ umask 077
 REPO="${QUOTAGATE_REPO:-https://github.com/waleedzidan2020/Quotagate.git}"
 BRANCH="${QUOTAGATE_BRANCH:-main}"
 APP=/opt/quotagate
+CFG=/etc/quotagate/config.json
 STATE=/var/lib/quotagate/installed_commit
 BACKUPS=/var/lib/quotagate/update-backups
 TMP=$(mktemp -d /tmp/quotagate-update.XXXXXX)
 MODE="${1:-update}"
-HEALTH="http://192.168.2.1:8080/api/health"
 STAMP=$(date +%Y%m%d-%H%M%S)
 BACKUP="$BACKUPS/$STAMP"
 trap 'rm -rf "$TMP"' EXIT
@@ -34,6 +34,7 @@ for p in app web init/quotagate scripts/network-start.sh scripts/network-stop.sh
   [ -e "$SRC/$p" ] || { echo "Missing required update file: $p"; exit 1; }
 done
 python3 -m compileall -q "$SRC/app"
+if command -v node >/dev/null 2>&1; then node --check "$SRC/web/app.js" >/dev/null; fi
 
 install -d -m0700 "$BACKUPS" "$BACKUP"
 [ -d "$APP" ] && cp -a "$APP" "$BACKUP/app"
@@ -41,6 +42,7 @@ install -d -m0700 "$BACKUPS" "$BACKUP"
 for f in /usr/local/sbin/quotagate-network-start /usr/local/sbin/quotagate-network-stop /usr/local/sbin/quotagate-diagnose /usr/local/sbin/quotagate-setup-network /usr/local/sbin/quotagate-make-cert /usr/local/sbin/quotagate-pppoe-test /usr/local/sbin/quotagate-update; do
   [ -f "$f" ] && cp -a "$f" "$BACKUP/$(basename "$f")"
 done
+[ -f "$STATE" ] && cp -a "$STATE" "$BACKUP/installed_commit" || true
 
 service quotagate stop >/dev/null 2>&1 || true
 NEW=/opt/.quotagate-update-new
@@ -64,11 +66,26 @@ install -m755 "$SRC/scripts/pppoe-test.sh" /usr/local/sbin/quotagate-pppoe-test
 install -m755 "$SRC/scripts/update.sh" /usr/local/sbin/quotagate-update
 update-rc.d quotagate defaults >/dev/null 2>&1 || true
 
+HEALTH_INFO=$(python3 - <<'PY'
+import json
+try:
+ c=json.load(open('/etc/quotagate/config.json'))
+ w=c.get('web',{});scheme='https' if w.get('https') else 'http';host=w.get('host','192.168.2.1');port=int(w.get('port',8080));print(scheme,host,port)
+except Exception: print('http 192.168.2.1 8080')
+PY
+)
+read -r SCHEME HOST PORT <<EOF
+$HEALTH_INFO
+EOF
+HEALTH="$SCHEME://$HOST:$PORT/api/health"
+CURL_TLS=()
+[ "$SCHEME" = "https" ] && CURL_TLS=(-k)
+
 service quotagate start
 OK=0
-for _ in 1 2 3 4 5 6 7 8; do
+for _ in 1 2 3 4 5 6 7 8 9 10; do
   sleep 1
-  if curl -fsS --max-time 2 "$HEALTH" 2>/dev/null | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true'; then OK=1; break; fi
+  if curl "${CURL_TLS[@]}" -fsS --max-time 2 "$HEALTH" 2>/dev/null | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true'; then OK=1; break; fi
 done
 if [ "$OK" -eq 1 ]; then
   printf '%s\n' "$REMOTE" >"$STATE"; chmod 600 "$STATE"
@@ -84,5 +101,6 @@ rm -rf "$APP"
 for f in quotagate-network-start quotagate-network-stop quotagate-diagnose quotagate-setup-network quotagate-make-cert quotagate-pppoe-test quotagate-update; do
   [ -f "$BACKUP/$f" ] && cp -a "$BACKUP/$f" "/usr/local/sbin/$f"
 done
+if [ -f "$BACKUP/installed_commit" ]; then cp -a "$BACKUP/installed_commit" "$STATE"; else rm -f "$STATE"; fi
 service quotagate start >/dev/null 2>&1 || true
 exit 1
