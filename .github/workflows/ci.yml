@@ -41,6 +41,7 @@ jobs:
               {'id':5,'ip':'not-an-ip','mac':'aa:bb:cc:dd:ee:05','last_seen':50,'enabled':1,'blocked_manual':0},
           ]
           shaping_policy._neighbor_map=lambda:{'192.168.2.10':'aa:bb:cc:dd:ee:03'}
+          shaping_policy.db.mac_rules=lambda:[]
           safe = shaping_policy._sanitize_devices(devices)
           assert [d['id'] for d in safe] == [3, 4]
           assert shaping_policy._valid_mac('aa:bb:cc:dd:ee:ff')
