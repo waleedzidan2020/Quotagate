@@ -51,6 +51,7 @@ jobs:
         run: |
           node --check web/app.js
           node --check web/app-core.js
+          node --check web/speed-toggle.js
           node --check web/guest-mode.js
           node --check web/guest-shaping.js
       - name: Shell syntax
