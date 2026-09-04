@@ -13,6 +13,22 @@ jobs:
         run: python3 -m compileall -q app
       - name: Python import smoke test
         run: python3 -c "import app; import app.shaping; import app.diagnostics; import app.guestmode"
+      - name: Guest speed policy semantics
+        run: |
+          python3 - <<'PY'
+          from app import guestmode
+          c={'guest':{'speed_down_kbit':2000,'speed_up_kbit':512}}
+          g={'is_guest':1,'speed_down_kbit':0,'speed_up_kbit':0}
+          assert guestmode._effective_rate(g, {}, 'speed_down_kbit', c) == 2000
+          assert guestmode._effective_rate(g, {}, 'speed_up_kbit', c) == 512
+          assert guestmode._effective_rate({'is_guest':1,'speed_down_kbit':1000}, {}, 'speed_down_kbit', c) == 1000
+          assert guestmode._effective_rate({'is_guest':1,'speed_down_kbit':-1}, {}, 'speed_down_kbit', c) == 0
+          assert guestmode._role({'is_guest':1}, 'aa:bb:cc:dd:ee:ff', set()) == 'guest'
+          assert guestmode._role({}, 'aa:bb:cc:dd:ee:ff', {'aa:bb:cc:dd:ee:ff'}) == 'existing_at_activation'
+          assert guestmode._role({'user_id':7}, 'aa:bb:cc:dd:ee:ff', set()) == 'managed'
+          assert guestmode._role({}, 'aa:bb:cc:dd:ee:ff', set()) == 'unassigned'
+          print('guest policy semantics: OK')
+          PY
       - name: JavaScript syntax
         run: |
           node --check web/app.js
