@@ -1,6 +1,7 @@
 from __future__ import annotations
 import re, statistics, subprocess, time
 from pathlib import Path
+from . import db, shaping
 
 
 def run(args, timeout=5):
@@ -96,7 +97,15 @@ def vpn_interfaces():
 
 def snapshot(c, include_ping=False):
     n=c['network']; lan=n.get('lan_interface','wlan0'); wan=n.get('wan_interface','eth0')
-    data={'wan':interface_status(wan),'lan':interface_status(lan),'wifi':wifi_stations(lan),'vpn_interfaces':vpn_interfaces(),'default_gateway':default_gateway(),'timestamp':int(time.time())}
+    data={
+        'wan':interface_status(wan),
+        'lan':interface_status(lan),
+        'wifi':wifi_stations(lan),
+        'vpn_interfaces':vpn_interfaces(),
+        'default_gateway':default_gateway(),
+        'shaping':shaping.status(c, db.devices(), db.users()),
+        'timestamp':int(time.time())
+    }
     if include_ping:
         gw=data['default_gateway']
         target=str(c.get('diagnostics',{}).get('internet_target','1.1.1.1'))
