@@ -1,22 +1,37 @@
 (function(){
   const $q=id=>document.getElementById(id);
   let LAST_GUEST=null;
+  const MIN_MBIT=0.064;
 
   function kb(v){
     v=Number(v||0);
     if(v<=0)return 'Unlimited';
     return v>=1000?(v/1000).toFixed(v%1000?2:0)+' Mbps':v+' kbit';
   }
-  function roleName(r){return r==='guest'?'Guest':r==='managed'?'Managed':r==='existing_at_activation'?'متصل قبل تفعيل Guest':'Unassigned'}
-  function roleClass(r){return r==='guest'?'ok':r==='managed'?'':'existing_at_activation'?'warn':''}
-  function overrideValue(v){v=Number(v||0);return v<0?'0':v>0?String(v):''}
-  function storedFromInput(id){
-    const raw=($q(id)?.value||'').trim();
-    if(raw==='')return 0;
+  function mbitValueFromKbit(v){
+    v=Number(v||0);
+    if(v<0)return '0';
+    if(v===0)return '';
+    const m=v/1000;
+    return String(Number(m.toFixed(3)));
+  }
+  function mbitFromKbit(v){
+    v=Number(v||0);
+    return v>0?Number((v/1000).toFixed(3)):0;
+  }
+  function toKbitFromMbps(raw,{allowInherit=false}={}){
+    raw=String(raw??'').trim();
+    if(raw==='')return allowInherit?0:0;
     const n=Number(raw);
     if(!Number.isFinite(n)||n<0)throw Error('السرعة يجب أن تكون 0 أو أكبر');
-    return n===0?-1:Math.round(n);
+    if(n===0)return allowInherit?-1:0;
+    if(n<MIN_MBIT)throw Error('أقل سرعة مسموحة هي 0.064 Mbps (64 kbit). استخدم 0 لو عايز Unlimited.');
+    return Math.round(n*1000);
   }
+  function roleName(r){return r==='guest'?'Guest':r==='managed'?'Managed':r==='existing_at_activation'?'متصل قبل تفعيل Guest':'Unassigned'}
+  function roleClass(r){return r==='guest'?'ok':r==='managed'?'':'existing_at_activation'?'warn':''}
+  function storedFromInput(id){return toKbitFromMbps($q(id)?.value,{allowInherit:true})}
+
   function activateGuestTab(){
     document.querySelectorAll('#tabs button').forEach(x=>x.classList.remove('active'));
     document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
@@ -40,10 +55,10 @@
           <h2>Guest Mode</h2>
           <label><input id="guestEnabled" type="checkbox"> تفعيل Guest Mode</label>
           <label>Guest Quota GB<input id="guestQuota" type="number" min="0" step="0.1"></label>
-          <label>Default Download kbit<input id="guestDown" type="number" min="0" step="1"></label>
-          <label>Default Upload kbit<input id="guestUp" type="number" min="0" step="1"></label>
+          <label>Default Download Mbps<input id="guestDown" type="number" min="0" step="0.1" placeholder="مثال: 2 = 2 Mbps"></label>
+          <label>Default Upload Mbps<input id="guestUp" type="number" min="0" step="0.1" placeholder="مثال: 0.5 = 500 kbit"></label>
           <label>Max Guest Devices<input id="guestMax" type="number" min="1" max="100" step="1"></label>
-          <small>السرعة Per Guest وليست Shared Pool. القيمة 0 في السرعة العامة = Unlimited.</small>
+          <small>السرعة هنا Mbps وبشكل Per Guest وليست Shared Pool. 0 = Unlimited. أقل Limit موجب هو 0.064 Mbps.</small>
           <div class="toolbar">
             <button onclick="saveGuestModeState()">حفظ حالة Guest</button>
             <button class="warn" onclick="applyGuestSettingsAll()">Apply Guest Settings to ALL Guests</button>
@@ -58,7 +73,7 @@
       <div class="row"><h2>Active Guests</h2><button class="ghost" onclick="loadGuestControlCenter()">تحديث</button></div>
       <div id="activeGuests" class="grid"></div>
       <h2>Currently Connected Devices</h2>
-      <small>هذه القائمة من iw station dump وليست كل الأجهزة المخزنة في SQLite. الحقل الفارغ = inherit/default، والقيمة 0 = Unlimited override.</small>
+      <small>هذه القائمة من iw station dump. سرعة الجهاز بالـMbps: الحقل الفارغ = inherit/default، و0 = Unlimited override.</small>
       <div id="connectedGuestDevices" class="grid"></div>`;
   }
 
@@ -66,14 +81,16 @@
     const box=$q('guestSpeedStatus');if(!box)return;
     if(!s){box.innerHTML='<span class="muted">لا توجد بيانات shaping.</span>';return}
     const cfg=s.guest_config||{};
-    const state=!s.enabled?'<span class="pill bad">Shaping OFF</span>':s.healthy?'<span class="pill ok">Kernel Applied</span>':'<span class="pill bad">Kernel Failed</span>';
-    let html=`<div class="row">${state}<span class="pill">Per Guest</span></div><div>Configured: <b>${kb(cfg.down_kbit)} ↓</b> / <b>${kb(cfg.up_kbit)} ↑</b></div><small>التحقق يشمل nftables marks و tc qdisc/classes/filters.</small>`;
+    const state=!s.enabled?'<span class="pill bad">Shaping OFF</span>':s.healthy?'<span class="pill ok">Kernel Applied</span>':'<span class="pill bad">Kernel Failed / Internet restored unshaped</span>';
+    let html=`<div class="row">${state}<span class="pill">Fail-open</span><span class="pill">Per Guest</span></div><div>Configured: <b>${kb(cfg.down_kbit)} ↓</b> / <b>${kb(cfg.up_kbit)} ↑</b></div><small>لو tc/nftables فشل، QuotaGate يشيل الـshaping ويرجع الإنترنت بدون Limit بدل ما يقطع الاتصال.</small>`;
     if(s.last_error)html+=`<div class="bad" style="margin-top:8px">${esc(s.last_error)}</div>`;
     box.innerHTML=html;
   }
 
   function speedInputs(x,prefix){
-    return `<label>Download kbit<input id="${prefix}Down" type="number" min="0" step="1" value="${overrideValue(x.stored_down_kbit)}" placeholder="Default: ${x.effective_down_kbit||0}"></label><label>Upload kbit<input id="${prefix}Up" type="number" min="0" step="1" value="${overrideValue(x.stored_up_kbit)}" placeholder="Default: ${x.effective_up_kbit||0}"></label>`;
+    const downVal=mbitValueFromKbit(x.stored_down_kbit),upVal=mbitValueFromKbit(x.stored_up_kbit);
+    const downDefault=mbitFromKbit(x.effective_down_kbit),upDefault=mbitFromKbit(x.effective_up_kbit);
+    return `<label>Download Mbps<input id="${prefix}Down" type="number" min="0" step="0.1" value="${downVal}" placeholder="Default: ${downDefault} Mbps"></label><label>Upload Mbps<input id="${prefix}Up" type="number" min="0" step="0.1" value="${upVal}" placeholder="Default: ${upDefault} Mbps"></label>`;
   }
 
   function renderActiveGuests(g){
@@ -107,19 +124,19 @@
       const j=await api('/api/diagnostics');const g=j.guest_mode||{};LAST_GUEST=g;
       if($q('guestEnabled'))$q('guestEnabled').checked=!!g.enabled;
       if($q('guestQuota'))$q('guestQuota').value=g.quota_gb??0.5;
-      if($q('guestDown'))$q('guestDown').value=g.speed_down_kbit??1024;
-      if($q('guestUp'))$q('guestUp').value=g.speed_up_kbit??256;
+      if($q('guestDown'))$q('guestDown').value=mbitFromKbit(g.speed_down_kbit??1024);
+      if($q('guestUp'))$q('guestUp').value=mbitFromKbit(g.speed_up_kbit??256);
       if($q('guestMax'))$q('guestMax').value=g.max_devices??10;
       renderGuestShaping(g.shaping||j.shaping||{});renderActiveGuests(g);renderConnected(g);
     }catch(e){setApplyState(esc(e.message),'bad')}
   }
 
   function guestPayload(withRevision=false){
-    const down=+$q('guestDown').value,up=+$q('guestUp').value,quota=+$q('guestQuota').value,max=+$q('guestMax').value;
-    if(!Number.isFinite(down)||down<0||!Number.isFinite(up)||up<0)throw Error('سرعات Guest يجب أن تكون 0 أو أكبر');
+    const quota=+$q('guestQuota').value,max=+$q('guestMax').value;
+    const down=toKbitFromMbps($q('guestDown').value),up=toKbitFromMbps($q('guestUp').value);
     if(!Number.isFinite(quota)||quota<0)throw Error('Quota غير صحيحة');
     if(!Number.isInteger(max)||max<1||max>100)throw Error('Max Guests يجب أن يكون بين 1 و100');
-    const g={enabled:$q('guestEnabled').checked,quota_gb:quota,speed_down_kbit:Math.round(down),speed_up_kbit:Math.round(up),max_devices:max};
+    const g={enabled:$q('guestEnabled').checked,quota_gb:quota,speed_down_kbit:down,speed_up_kbit:up,max_devices:max};
     if(withRevision)g.apply_revision=Date.now();
     return g;
   }
@@ -141,9 +158,9 @@
       await refreshAll();
       const j=await api('/api/diagnostics'),g=j.guest_mode||{};LAST_GUEST=g;
       renderGuestShaping(g.shaping||j.shaping||{});renderActiveGuests(g);renderConnected(g);
-      if(!g.shaping_healthy&&(Number(g.speed_down_kbit)>0||Number(g.speed_up_kbit)>0))throw Error(g.shaping_error||'Kernel shaping verification failed');
+      if(!g.shaping_healthy&&(Number(g.speed_down_kbit)>0||Number(g.speed_up_kbit)>0))throw Error(g.shaping_error||'Kernel shaping verification failed; Internet restored without shaping');
       setApplyState(`Applied ✅ — ${kb(g.speed_down_kbit)} ↓ / ${kb(g.speed_up_kbit)} ↑ لكل Guest`,'ok');
-    }catch(e){setApplyState('Kernel Apply Failed: '+esc(e.message),'bad')}
+    }catch(e){setApplyState('Kernel Apply Failed — Internet restored unshaped: '+esc(e.message),'bad')}
   }
 
   async function applyConnectedDeviceSpeed(id,prefix){
@@ -153,9 +170,9 @@
       await api('/api/device/update',{id,speed_down_kbit:down,speed_up_kbit:up});
       await refreshAll();await loadGuestControlCenter();
       const x=(LAST_GUEST?.connected||[]).find(d=>Number(d.device_id)===Number(id));
-      if(LAST_GUEST&&!LAST_GUEST.shaping_healthy&&(x&&(x.effective_down_kbit>0||x.effective_up_kbit>0)))throw Error(LAST_GUEST.shaping_error||'Kernel verification failed');
+      if(LAST_GUEST&&!LAST_GUEST.shaping_healthy&&(x&&(x.effective_down_kbit>0||x.effective_up_kbit>0)))throw Error(LAST_GUEST.shaping_error||'Kernel verification failed; Internet restored without shaping');
       setApplyState(`Device ${id}: Applied ✅`,'ok');
-    }catch(e){setApplyState(`Device ${id}: Kernel Apply Failed — ${esc(e.message)}`,'bad')}
+    }catch(e){setApplyState(`Device ${id}: Limit failed — Internet restored unshaped — ${esc(e.message)}`,'bad')}
   }
 
   async function resetGuestDefault(id){

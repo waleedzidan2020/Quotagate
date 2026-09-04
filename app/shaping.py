@@ -9,6 +9,10 @@ _LAST_ERROR = ''
 _LAST_ERROR_SIG = None
 _VERIFY_INTERVAL = 60.0
 _MARK_BASE = 0x510000
+_MIN_LIMIT_KBIT = 64
+# Keep unclassified traffic effectively unshaped. The physical NIC/radio remains
+# the real ceiling; only explicitly classified devices receive the configured cap.
+_PASS_THROUGH_KBIT = 100000
 
 
 def _run(args, check=False, timeout=5, input_text=None):
@@ -38,6 +42,14 @@ def _device_mark(device_id):
     return _MARK_BASE + (int(device_id) & 0xFFFF)
 
 
+def _device_classid(device_id):
+    # Stable class id: changing one device must not renumber every other class.
+    minor = 10 + (int(device_id) % 60000)
+    if minor == 999:
+        minor = 60010
+    return f'1:{minor}'
+
+
 def _effective_rate(device, user, key, c):
     device_rate = int(device.get(key) or 0)
     if device_rate > 0:
@@ -53,14 +65,20 @@ def _limits(c, devices, users):
     for d in sorted(devices, key=lambda x: int(x.get('id') or 0)):
         ip = str(d.get('ip') or '')
         try:
-            ipaddress.ip_address(ip)
+            addr = ipaddress.ip_address(ip)
+            if addr.version != 4:
+                continue
         except Exception:
             continue
         u = um.get(d.get('user_id')) or {}
         dr = _effective_rate(d, u, 'speed_down_kbit', c)
         ur = _effective_rate(d, u, 'speed_up_kbit', c)
         mark = _device_mark(d['id'])
-        item = {'id': int(d['id']), 'ip': ip, 'mark': mark, 'name': d.get('name') or ip, 'is_guest': bool(d.get('is_guest'))}
+        item = {
+            'id': int(d['id']), 'ip': ip, 'mark': mark,
+            'classid': _device_classid(d['id']),
+            'name': d.get('name') or ip, 'is_guest': bool(d.get('is_guest'))
+        }
         if dr > 0:
             down.append({**item, 'rate': dr})
         if ur > 0:
@@ -71,10 +89,29 @@ def _limits(c, devices, users):
 def _line_rate(c, direction):
     n = c['network']
     raw = n.get('line_down_mbit' if direction == 'down' else 'line_up_mbit', 0)
-    total = int(float(raw) * 1000)
+    try:
+        total = int(float(raw) * 1000)
+    except Exception:
+        total = 0
     if total <= 0:
         raise ValueError(f'{direction} line speed must be greater than 0 Mbps when shaping is enabled')
-    return max(64, total)
+    return max(_MIN_LIMIT_KBIT, total)
+
+
+def _prepared_items(c, direction, items):
+    if not items:
+        return [], None
+    total = _line_rate(c, direction)
+    out = []
+    for x in items:
+        requested = int(x.get('rate') or 0)
+        if requested <= 0:
+            continue
+        # Extremely tiny values make Windows/phones report "No Internet" even
+        # though packets technically pass. Clamp positive limits to a usable floor.
+        rate = max(_MIN_LIMIT_KBIT, min(requested, total))
+        out.append({**x, 'requested_rate': requested, 'rate': rate})
+    return out, total
 
 
 def _sync_guest_profiles(c, devices, users):
@@ -160,30 +197,48 @@ def _delete_root(iface):
     _run(['tc', 'qdisc', 'del', 'dev', iface, 'root'])
 
 
+def _has_our_root(iface):
+    p = _run(['tc', 'qdisc', 'show', 'dev', iface])
+    return p.returncode == 0 and bool(re.search(r'\bhtb\s+1:\s+root\b', p.stdout))
+
+
+def _ensure_root(iface, pass_rate):
+    # Do not tear down a working HTB tree for every speed edit. This is what used
+    # to create a disruptive gap and could leave the interface half-configured.
+    if not _has_our_root(iface):
+        _delete_root(iface)
+        _run(['tc', 'qdisc', 'add', 'dev', iface, 'root', 'handle', '1:', 'htb', 'default', '999'], check=True)
+    _run(['tc', 'class', 'replace', 'dev', iface, 'parent', '1:', 'classid', '1:999', 'htb',
+          'rate', f'{pass_rate}kbit', 'ceil', f'{pass_rate}kbit'], check=True)
+    _run(['tc', 'qdisc', 'replace', 'dev', iface, 'parent', '1:999', 'fq_codel'], check=True)
+
+
 def _shape_iface(iface, direction, items, c):
     iface = _iface(iface)
     if not Path('/sys/class/net').joinpath(iface).exists():
         raise RuntimeError(f'tc interface {iface} does not exist')
-    _delete_root(iface)
-    if not items:
+    prepared, total = _prepared_items(c, direction, items)
+    if not prepared:
+        _delete_root(iface)
         return []
-    total = _line_rate(c, direction)
-    _run(['tc', 'qdisc', 'add', 'dev', iface, 'root', 'handle', '1:', 'htb', 'default', '999'], check=True)
-    _run(['tc', 'class', 'add', 'dev', iface, 'parent', '1:', 'classid', '1:999', 'htb',
-          'rate', f'{total}kbit', 'ceil', f'{total}kbit'], check=True)
-    _run(['tc', 'qdisc', 'add', 'dev', iface, 'parent', '1:999', 'fq_codel'], check=True)
+
+    pass_rate = max(_PASS_THROUGH_KBIT, int(total or 0))
+    _ensure_root(iface, pass_rate)
+
+    # Replace only QuotaGate's filter priority. During this tiny window traffic
+    # goes through the default pass-through class instead of being dropped.
+    _run(['tc', 'filter', 'del', 'dev', iface, 'parent', '1:', 'protocol', 'ip', 'prio', '10'])
+
     applied = []
-    cls = 10
-    for x in items:
-        rate = max(8, min(int(x['rate']), total))
-        cid = f'1:{cls}'
-        _run(['tc', 'class', 'add', 'dev', iface, 'parent', '1:', 'classid', cid, 'htb',
+    for x in prepared:
+        cid = x['classid']
+        rate = int(x['rate'])
+        _run(['tc', 'class', 'replace', 'dev', iface, 'parent', '1:', 'classid', cid, 'htb',
               'rate', f'{rate}kbit', 'ceil', f'{rate}kbit'], check=True)
-        _run(['tc', 'qdisc', 'add', 'dev', iface, 'parent', cid, 'fq_codel'], check=True)
+        _run(['tc', 'qdisc', 'replace', 'dev', iface, 'parent', cid, 'fq_codel'], check=True)
         _run(['tc', 'filter', 'add', 'dev', iface, 'parent', '1:', 'protocol', 'ip',
               'prio', '10', 'handle', hex(x['mark']), 'fw', 'flowid', cid], check=True)
-        applied.append({**x, 'applied_rate': rate, 'classid': cid})
-        cls += 1
+        applied.append({**x, 'applied_rate': rate})
     return applied
 
 
@@ -212,13 +267,22 @@ def _kernel_ok(c, down, up):
     return _tc_iface_ok(lan, len(down)) and _tc_iface_ok(wan, len(up))
 
 
-def clear(c):
-    global _SHAPE_SIG, _LAST_VERIFY
-    n = c['network']
+def _fail_open(c):
+    # Safety rule: a failed QoS update must NEVER leave the household offline.
+    # Remove QuotaGate shaping/marks and let Linux/NIC defaults pass traffic.
+    n = c.get('network', {})
     for iface in {n.get('lan_interface', 'wlan0'), n.get('wan_interface', 'eth0'), _wan_interface(c)}:
         if iface:
-            _delete_root(_iface(iface))
+            try:
+                _delete_root(_iface(iface))
+            except Exception:
+                pass
     _delete_mark_table()
+
+
+def clear(c):
+    global _SHAPE_SIG, _LAST_VERIFY
+    _fail_open(c)
     _SHAPE_SIG = None
     _LAST_VERIFY = time.time()
 
@@ -244,8 +308,14 @@ def shaping(c, devices, users, force=False):
         clear(c)
         _LAST_ERROR = ''
         return True
+
     _sync_guest_profiles(c, devices, users)
     down, up = _limits(c, devices, users)
+
+    # Validate every requested direction BEFORE touching tc/nftables.
+    _prepared_items(c, 'down', down)
+    _prepared_items(c, 'up', up)
+
     sig = _signature(c, devices, users)
     now = time.time()
     if not force and sig == _SHAPE_SIG and now - _LAST_VERIFY < _VERIFY_INTERVAL:
@@ -270,17 +340,20 @@ def shaping(c, devices, users, force=False):
             db.event('Traffic shaping kernel state was missing and was rebuilt automatically', 'warning')
             db.alert('shaping-self-heal', 'Traffic shaping disappeared from kernel state and was rebuilt automatically')
         elif down or up:
-            db.event(f'Traffic shaping applied: {len(down)} download / {len(up)} upload device limits', 'info')
+            db.event(f'Traffic shaping applied safely: {len(down)} download / {len(up)} upload device limits', 'info')
         return True
     except Exception as e:
+        # Most important guarantee: bad speed input or unsupported tc feature must
+        # fail open. Internet comes back immediately without restarting Wi-Fi.
+        _fail_open(c)
         _SHAPE_SIG = None
         _LAST_VERIFY = time.time()
         msg = str(e)[:500]
         _LAST_ERROR = msg
         err_sig = (msg, sig)
         if err_sig != _LAST_ERROR_SIG:
-            db.event('Traffic shaping apply failed: ' + msg, 'error')
-            db.alert('shaping-failed', 'Traffic shaping could not be applied: ' + msg)
+            db.event('Traffic shaping apply failed; restored unshaped Internet: ' + msg, 'error')
+            db.alert('shaping-failed', 'Speed limit failed; Internet was restored without shaping: ' + msg)
             _LAST_ERROR_SIG = err_sig
         raise
 
@@ -327,4 +400,6 @@ def status(c, devices, users):
         'limited_upload_devices': len(up),
         'last_error': _LAST_ERROR,
         'verification_interval_seconds': int(_VERIFY_INTERVAL),
+        'minimum_limit_kbit': _MIN_LIMIT_KBIT,
+        'fail_open': True,
     }
