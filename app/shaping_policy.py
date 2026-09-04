@@ -1,6 +1,7 @@
 from __future__ import annotations
 import ipaddress, re
-from . import config, db, shaping, guestmode
+from pathlib import Path
+from . import config, db, shaping, guestmode, network
 
 _INSTALLED = False
 _ORIG_LIMITS = None
@@ -10,6 +11,9 @@ _ORIG_CREATE_USER = None
 _ORIG_UPDATE_USER = None
 _ORIG_UPDATE_DEVICE = None
 _ORIG_UPSERT_DEVICE = None
+_ORIG_DEVICE_BY_IP = None
+_ORIG_BLOCKED = None
+_ORIG_SYNC_RULES = None
 
 _MAC_RE = re.compile(r'^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$', re.I)
 _ZERO_MAC = '00:00:00:00:00:00'
@@ -29,10 +33,31 @@ def _valid_ipv4(ip):
         return False
 
 
-def _device_score(d):
-    # A duplicated DHCP address belongs to the device seen most recently.
-    # enabled/id are deterministic tie-breakers when timestamps are equal.
+def _neighbor_map():
+    """Best-effort current IPv4 -> MAC ownership from the kernel ARP table."""
+    out = {}
+    try:
+        lines = Path('/proc/net/arp').read_text(errors='ignore').splitlines()[1:]
+        for line in lines:
+            p = line.split()
+            if len(p) < 4:
+                continue
+            ip, mac = p[0], p[3].lower()
+            if _valid_ipv4(ip) and _valid_mac(mac):
+                out[ip] = mac
+    except Exception:
+        pass
+    return out
+
+
+def _device_score(d, neighbors=None):
+    ip = str(d.get('ip') or '')
+    mac = str(d.get('mac') or '').lower()
+    owner = 1 if neighbors and neighbors.get(ip) == mac else 0
+    # Prefer the MAC the kernel currently associates with the IP. This matters
+    # when stale DHCP leases keep refreshing two database rows with one address.
     return (
+        owner,
         int(d.get('last_seen') or 0),
         int(bool(d.get('enabled'))),
         int(d.get('id') or 0),
@@ -40,19 +65,20 @@ def _device_score(d):
 
 
 def _sanitize_devices(devices):
-    """Return one safe shaping owner per IPv4 address.
+    """Return one safe policy owner per IPv4 address.
 
     Invalid/placeholder MAC rows never reach tc/nftables. If stale DB rows share
-    one IP, only the most recently seen valid device owns that IP's mark/class.
-    The database is intentionally left untouched; this is a kernel-policy guard.
+    one IP, the live kernel-neighbor MAC wins; otherwise newest valid row wins.
+    The database is intentionally left untouched so usage/history are preserved.
     """
     by_ip = {}
+    neighbors = _neighbor_map()
     for d in devices:
         ip = str(d.get('ip') or '')
         if not _valid_mac(d.get('mac')) or not _valid_ipv4(ip):
             continue
         prev = by_ip.get(ip)
-        if prev is None or _device_score(d) > _device_score(prev):
+        if prev is None or _device_score(d, neighbors) > _device_score(prev, neighbors):
             by_ip[ip] = d
     return sorted(by_ip.values(), key=lambda x: int(x.get('id') or 0))
 
@@ -70,8 +96,6 @@ def _persist_speed_feature(c, reason):
     if c.get('features', {}).get('speed_limits', True):
         return False
     c.setdefault('features', {})['speed_limits'] = True
-    # Only the feature flag changes here. Use the original on-disk writer to
-    # avoid recursively re-entering the Guest Mode/config wrappers.
     guestmode._ORIG_SAVE(c)
     try:
         db.event('Traffic shaping auto-enabled: ' + reason, 'info')
@@ -112,11 +136,29 @@ def update_device(i, **kw):
 
 
 def upsert_device(mac, ip, *args, **kwargs):
-    # Discovery occasionally reports the all-zero placeholder MAC. Never create
-    # or refresh a device record from it; shaping also independently rejects it.
     if not _valid_mac(mac):
+        try: db.event(f'Ignored invalid/placeholder device MAC {mac!s} at {ip!s}', 'warning')
+        except Exception: pass
         return 0, False
     return _ORIG_UPSERT_DEVICE(mac, ip, *args, **kwargs)
+
+
+def device_by_ip(ip):
+    """Resolve an IP to the single current valid device owner."""
+    ip = str(ip or '')
+    candidates = [d for d in db.devices() if str(d.get('ip') or '') == ip]
+    safe = _sanitize_devices(candidates)
+    return safe[0] if safe else None
+
+
+def blocked(c, users, devices):
+    """Never let a stale duplicate row block the live device sharing its IP."""
+    return _ORIG_BLOCKED(c, users, _sanitize_devices(devices))
+
+
+def sync_rules(c, devices, blocked_ips):
+    """Create firewall counters/rules once per live IPv4 owner only."""
+    return _ORIG_SYNC_RULES(c, _sanitize_devices(devices), blocked_ips)
 
 
 def save(c):
@@ -153,17 +195,17 @@ def status(c, devices, users):
         did = int(item.get('device_id') or 0)
         if did not in eligible:
             item['applied'] = False
-            item['reason'] = 'invalid MAC or duplicate/stale IP; excluded from kernel shaping'
+            item['reason'] = 'invalid MAC or duplicate/stale IP; excluded from kernel policy'
     return data
 
 
 def install():
     global _INSTALLED, _ORIG_LIMITS, _ORIG_STATUS, _ORIG_CONFIG_SAVE
     global _ORIG_CREATE_USER, _ORIG_UPDATE_USER, _ORIG_UPDATE_DEVICE, _ORIG_UPSERT_DEVICE
+    global _ORIG_DEVICE_BY_IP, _ORIG_BLOCKED, _ORIG_SYNC_RULES
     if _INSTALLED:
         return
 
-    # Guest Mode installs first. Capture its wrappers so both behaviors compose.
     _ORIG_LIMITS = shaping._limits
     _ORIG_STATUS = shaping.status
     _ORIG_CONFIG_SAVE = config.save
@@ -171,6 +213,9 @@ def install():
     _ORIG_UPDATE_USER = db.update_user
     _ORIG_UPDATE_DEVICE = db.update_device
     _ORIG_UPSERT_DEVICE = db.upsert_device
+    _ORIG_DEVICE_BY_IP = db.device_by_ip
+    _ORIG_BLOCKED = network.blocked
+    _ORIG_SYNC_RULES = network.sync_rules
 
     shaping._limits = _limits
     shaping.status = status
@@ -179,4 +224,7 @@ def install():
     db.update_user = update_user
     db.update_device = update_device
     db.upsert_device = upsert_device
+    db.device_by_ip = device_by_ip
+    network.blocked = blocked
+    network.sync_rules = sync_rules
     _INSTALLED = True
