@@ -1,8 +1,15 @@
 from __future__ import annotations
-import socket, socketserver, struct, threading, time, ipaddress
+import socket, socketserver, struct, threading, ipaddress
 from . import db
 
 QTYPE={1:'A',28:'AAAA',5:'CNAME',15:'MX',16:'TXT',2:'NS'}
+PRESETS={
+ 'ads_tracking':('doubleclick.net','googlesyndication.com','googleadservices.com','ads-twitter.com','app-measurement.com'),
+ 'social':('facebook.com','fbcdn.net','instagram.com','tiktok.com','twitter.com','x.com','snapchat.com'),
+ 'streaming':('netflix.com','nflxvideo.net','youtube.com','googlevideo.com','twitch.tv','spotify.com'),
+ 'gambling':('bet365.com','1xbet.com','betway.com','pokerstars.com'),
+ 'adult':('pornhub.com','xvideos.com','xnxx.com','redtube.com','youporn.com')
+}
 
 def parse_query(data):
     if len(data)<12:return None
@@ -16,36 +23,59 @@ def parse_query(data):
     qt=struct.unpack('!H',data[off:off+2])[0]
     return '.'.join(labels).lower().rstrip('.'), QTYPE.get(qt,str(qt)), off+4
 
-def blocked_reply(data, ipv6=False):
+def blocked_reply(data):
     if len(data)<12:return data
-    flags=struct.unpack('!H',data[2:4])[0]
-    flags=(flags|0x8000|0x0080) & ~0x000F
-    flags|=3
+    flags=struct.unpack('!H',data[2:4])[0]; flags=(flags|0x8000|0x0080)&~0x000F; flags|=3
     return data[:2]+struct.pack('!H',flags)+data[4:6]+b'\x00\x00\x00\x00\x00\x00'+data[12:]
 
-def match_rule(domain, client_ip):
+def redirect_reply(data,target):
+    try: packed=ipaddress.IPv4Address(target).packed
+    except Exception:return blocked_reply(data)
+    q=parse_query(data)
+    if not q or q[1]!='A':return blocked_reply(data)
+    qend=q[2]; flags=0x8180
+    header=data[:2]+struct.pack('!HHHHH',flags,1,1,0,0)
+    question=data[12:qend]
+    answer=b'\xc0\x0c'+struct.pack('!HHIH',1,1,60,4)+packed
+    return header+question+answer
+
+def _hit(domain,pattern):
+    p=pattern.lstrip('*.').lower().rstrip('.')
+    return domain==p or domain.endswith('.'+p)
+
+def explicit_rule(domain, client_ip):
     dev=db.device_by_ip(client_ip); did=dev['id'] if dev else 0; uid=dev.get('user_id') if dev else 0
-    rules=[r for r in db.dns_rules() if r['enabled']]
-    def hit(rule):
-        d=rule['domain'].lstrip('*.')
-        return domain==d or domain.endswith('.'+d)
     candidates=[]
-    for r in rules:
-        if not hit(r): continue
+    for r in db.dns_rules():
+        if not r['enabled'] or not _hit(domain,r['domain']):continue
         st=r['scope_type']; sid=int(r['scope_id'] or 0)
         if st=='global': candidates.append((1,r))
         elif st=='user' and uid and sid==int(uid): candidates.append((2,r))
         elif st=='device' and did and sid==int(did): candidates.append((3,r))
-    if not candidates:return None
-    return sorted(candidates,key=lambda x:x[0],reverse=True)[0][1]
+    return sorted(candidates,key=lambda x:x[0],reverse=True)[0][1] if candidates else None
 
-def upstreams(c):
+def preset_action(domain,c):
+    enabled=c.get('dns',{}).get('presets',{})
+    for name,domains in PRESETS.items():
+        if enabled.get(name) and any(_hit(domain,x) for x in domains):return {'action':'block','preset':name}
+    return None
+
+def upstreams(c,client_ip=''):
+    dev=db.device_by_ip(client_ip) if client_ip else None
+    if dev and dev.get('dns_server'):
+        return [dev['dns_server']]
+    if dev and dev.get('user_id'):
+        u=db.user_by_id(dev['user_id'])
+        if u and u.get('dns_server'):return [u['dns_server']]
+    if c.get('dns',{}).get('family_mode'):
+        return ['1.1.1.3','1.0.0.3']
     vals=c['network'].get('upstream_dns') or ['1.1.1.1','8.8.8.8']
     return [x for x in vals if x]
 
-def forward_udp(data, c):
-    for host in upstreams(c):
+def forward_udp(data,c,client_ip=''):
+    for host in upstreams(c,client_ip):
         try:
+            ipaddress.ip_address(host)
             s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.settimeout(2.5); s.sendto(data,(host,53)); ans,_=s.recvfrom(65535); s.close(); return ans
         except Exception: continue
     return blocked_reply(data)
@@ -54,19 +84,24 @@ class UDPHandler(socketserver.BaseRequestHandler):
     def handle(self):
         data,sock=self.request; ip=self.client_address[0]; q=parse_query(data)
         if not q:return
-        domain,qt,_=q; rule=match_rule(domain,ip); action='allow'
-        if rule and rule['action']=='block': ans=blocked_reply(data); action='block'
-        elif rule and rule['action']=='redirect': ans=blocked_reply(data); action='redirect'
-        else: ans=forward_udp(data,self.server.cfg)
+        domain,qt,_=q; rule=explicit_rule(domain,ip); preset=None if rule else preset_action(domain,self.server.cfg); action='allow'
+        chosen=rule or preset
+        if chosen and chosen.get('action')=='block': ans=blocked_reply(data); action='block'
+        elif chosen and chosen.get('action')=='redirect': ans=redirect_reply(data,chosen.get('target','')); action='redirect'
+        else: ans=forward_udp(data,self.server.cfg,ip)
         try:sock.sendto(ans,self.client_address)
         except Exception:pass
-        try: db.log_dns(ip,domain,qt,action)
-        except Exception:pass
+        if self.server.cfg.get('features',{}).get('dns_history',True):
+            try: db.log_dns(ip,domain,qt,action)
+            except Exception:pass
 
 class ThreadingUDP(socketserver.ThreadingMixIn,socketserver.UDPServer): daemon_threads=True; allow_reuse_address=True
 
 class DNSProxy:
     def __init__(self,c): self.cfg=c; self.srv=None; self.thread=None
+    def update_config(self,c):
+        self.cfg=c
+        if self.srv:self.srv.cfg=c
     def start(self):
         host=self.cfg['network']['lan_ip']; self.srv=ThreadingUDP((host,53),UDPHandler); self.srv.cfg=self.cfg
         self.thread=threading.Thread(target=self.srv.serve_forever,daemon=True); self.thread.start()
