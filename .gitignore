@@ -1,0 +1,57 @@
+# Persistent QuotaGate runtime data
+config.json
+**/config.json
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.log
+logs/
+log/
+secrets/
+secret/
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+*.csr
+runtime/
+run/
+backup/
+backups/
+**/backup/
+**/backups/
+
+# Python/cache/runtime
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.cache/
+*.pid
+*.sock
+
+# Virtual environments/builds
+venv/
+.venv/
+env/
+ENV/
+build/
+dist/
+*.egg-info/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*~
+*.swp
+*.swo
