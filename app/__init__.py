@@ -16,3 +16,10 @@ _network.clear_shaping = _shaping.clear
 # Guests and receive the configured quota/speed limits.
 from . import guestmode as _guestmode
 _guestmode.install()
+
+# Install policy guards after Guest Mode so the wrappers compose correctly:
+# - applying user/device/Guest speed limits automatically enables shaping;
+# - invalid placeholder MACs never become devices;
+# - duplicate IP rows cannot generate conflicting tc/nft marks.
+from . import shaping_policy as _shaping_policy
+_shaping_policy.install()
