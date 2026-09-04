@@ -12,10 +12,10 @@
   function overrideValue(v){v=Number(v||0);return v<0?'0':v>0?String(v):''}
   function storedFromInput(id){
     const raw=($q(id)?.value||'').trim();
-    if(raw==='')return 0; // inherit Guest/User default
+    if(raw==='')return 0;
     const n=Number(raw);
     if(!Number.isFinite(n)||n<0)throw Error('السرعة يجب أن تكون 0 أو أكبر');
-    return n===0?-1:Math.round(n); // -1 is the internal explicit-unlimited sentinel
+    return n===0?-1:Math.round(n);
   }
   function activateGuestTab(){
     document.querySelectorAll('#tabs button').forEach(x=>x.classList.remove('active'));
@@ -168,7 +168,7 @@
   }
 
   function moveGuestToUser(id){
-    const users=(window.S?.users||[]).filter(u=>!String(u.name||'').startsWith('Guest-'));
+    const users=(S?.users||[]).filter(u=>!String(u.name||'').startsWith('Guest-'));
     if(!users.length)return toast('<h3>لا يوجد مستخدم عادي</h3><p>أنشئ User أولاً.</p>');
     modal(`<h3>Move Guest to User</h3><select id="guestMoveUser">${users.map(u=>`<option value="${u.id}">${esc(u.name)}</option>`).join('')}</select><button onclick="confirmMoveGuest(${id})">نقل</button>`);
   }
