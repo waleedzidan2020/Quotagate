@@ -1,6 +1,7 @@
 (function(){
   const $q=id=>document.getElementById(id);
   let LAST_GUEST=null;
+  let SPEED_EDITOR_ACTIVE=false;
   const MIN_MBIT=0.064;
   const INPUT_DRAFTS=new Map();
   const GUEST_FORM_IDS=new Set(['guestQuota','guestDown','guestUp','guestMax']);
@@ -50,10 +51,27 @@
     const el=document.activeElement;
     return !!(box&&el&&box.contains(el)&&isDeviceSpeedInput(el));
   }
+  function deviceEditorLocked(){
+    return SPEED_EDITOR_ACTIVE||INPUT_DRAFTS.size>0;
+  }
+  function autoRefreshLocked(){
+    const el=document.activeElement;
+    return SPEED_EDITOR_ACTIVE||INPUT_DRAFTS.size>0||GUEST_FORM_DIRTY.size>0||isDeviceSpeedInput(el)||(el&&GUEST_FORM_IDS.has(el.id));
+  }
 
+  document.addEventListener('focusin',e=>{
+    if(isDeviceSpeedInput(e.target))SPEED_EDITOR_ACTIVE=true;
+  },true);
+  document.addEventListener('focusout',e=>{
+    if(!isDeviceSpeedInput(e.target))return;
+    setTimeout(()=>{SPEED_EDITOR_ACTIVE=isDeviceSpeedInput(document.activeElement)},0);
+  },true);
   document.addEventListener('input',e=>{
     const el=e.target;
-    if(isDeviceSpeedInput(el))INPUT_DRAFTS.set(el.id,el.value);
+    if(isDeviceSpeedInput(el)){
+      SPEED_EDITOR_ACTIVE=true;
+      INPUT_DRAFTS.set(el.id,el.value);
+    }
     if(el&&GUEST_FORM_IDS.has(el.id))GUEST_FORM_DIRTY.add(el.id);
   },true);
 
@@ -120,7 +138,7 @@
   }
 
   function renderActiveGuests(g){
-    const box=$q('activeGuests');if(!box||editorFocusedInside(box))return;
+    const box=$q('activeGuests');if(!box||editorFocusedInside(box)||deviceEditorLocked())return;
     const guests=g.active_guests||[];
     if(!guests.length){box.innerHTML='<div class="card muted">لا توجد أجهزة Guest متصلة حالياً.</div>';return}
     box.innerHTML=guests.map(x=>{
@@ -131,7 +149,7 @@
   }
 
   function renderConnected(g){
-    const box=$q('connectedGuestDevices');if(!box||editorFocusedInside(box))return;
+    const box=$q('connectedGuestDevices');if(!box||editorFocusedInside(box)||deviceEditorLocked())return;
     const rows=g.connected||[];
     if(!rows.length){box.innerHTML='<div class="card muted">لا توجد Wi-Fi stations متصلة حالياً.</div>';return}
     box.innerHTML=rows.map(x=>{
@@ -197,6 +215,7 @@
       setApplyState(`Applying speed for device ${id}…`);
       await api('/api/device/update',{id,speed_down_kbit:down,speed_up_kbit:up});
       clearDeviceDrafts(id);
+      SPEED_EDITOR_ACTIVE=false;
       await refreshAll();await loadGuestControlCenter();
       const x=(LAST_GUEST?.connected||[]).find(d=>Number(d.device_id)===Number(id));
       if(LAST_GUEST&&!LAST_GUEST.shaping_healthy&&(x&&(x.effective_down_kbit>0||x.effective_up_kbit>0)))throw Error(LAST_GUEST.shaping_error||'Kernel verification failed; Internet restored without shaping');
@@ -205,12 +224,12 @@
   }
 
   async function resetGuestDefault(id){
-    try{setApplyState(`Resetting Guest ${id} to defaults…`);await api('/api/device/update',{id,speed_down_kbit:0,speed_up_kbit:0});clearDeviceDrafts(id);await refreshAll();await loadGuestControlCenter();setApplyState(`Guest ${id}: Guest defaults applied ✅`,'ok')}catch(e){setApplyState(esc(e.message),'bad')}
+    try{setApplyState(`Resetting Guest ${id} to defaults…`);await api('/api/device/update',{id,speed_down_kbit:0,speed_up_kbit:0});clearDeviceDrafts(id);SPEED_EDITOR_ACTIVE=false;await refreshAll();await loadGuestControlCenter();setApplyState(`Guest ${id}: Guest defaults applied ✅`,'ok')}catch(e){setApplyState(esc(e.message),'bad')}
   }
 
   async function removeFromGuest(id){
     if(!confirm('إخراج الجهاز من Guest Mode؟ سيظل متصلاً بالـWi-Fi ولن يتم حذفه أو إضافته للـDeny List.'))return;
-    try{await api('/api/device/update',{id,is_guest:0,user_id:null,speed_down_kbit:0,speed_up_kbit:0,enabled:1});clearDeviceDrafts(id);await refreshAll();await loadGuestControlCenter();setApplyState(`Device ${id} moved to Unassigned ✅`,'ok')}catch(e){setApplyState(esc(e.message),'bad')}
+    try{await api('/api/device/update',{id,is_guest:0,user_id:null,speed_down_kbit:0,speed_up_kbit:0,enabled:1});clearDeviceDrafts(id);SPEED_EDITOR_ACTIVE=false;await refreshAll();await loadGuestControlCenter();setApplyState(`Device ${id} moved to Unassigned ✅`,'ok')}catch(e){setApplyState(esc(e.message),'bad')}
   }
 
   function moveGuestToUser(id){
@@ -219,7 +238,7 @@
     modal(`<h3>Move Guest to User</h3><select id="guestMoveUser">${users.map(u=>`<option value="${u.id}">${esc(u.name)}</option>`).join('')}</select><button onclick="confirmMoveGuest(${id})">نقل</button>`);
   }
   async function confirmMoveGuest(id){
-    try{const uid=+$q('guestMoveUser').value;await api('/api/device/update',{id,is_guest:0,user_id:uid,speed_down_kbit:0,speed_up_kbit:0,enabled:1});clearDeviceDrafts(id);closeModal();await refreshAll();await loadGuestControlCenter();setApplyState(`Device ${id} moved to User ✅`,'ok')}catch(e){setApplyState(esc(e.message),'bad')}
+    try{const uid=+$q('guestMoveUser').value;await api('/api/device/update',{id,is_guest:0,user_id:uid,speed_down_kbit:0,speed_up_kbit:0,enabled:1});clearDeviceDrafts(id);SPEED_EDITOR_ACTIVE=false;closeModal();await refreshAll();await loadGuestControlCenter();setApplyState(`Device ${id} moved to User ✅`,'ok')}catch(e){setApplyState(esc(e.message),'bad')}
   }
   async function blockGuest(id){
     if(!confirm('حظر الإنترنت عن هذا الجهاز؟'))return;
@@ -238,5 +257,7 @@
   window.moveGuestToUser=moveGuestToUser;
   window.confirmMoveGuest=confirmMoveGuest;
   window.blockGuest=blockGuest;
-  setInterval(()=>{if($q('guest')?.classList.contains('active'))loadGuestControlCenter()},5000);
+  setInterval(()=>{
+    if($q('guest')?.classList.contains('active')&&!autoRefreshLocked())loadGuestControlCenter();
+  },5000);
 })();
