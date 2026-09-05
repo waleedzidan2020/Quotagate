@@ -2,6 +2,9 @@
   const $q=id=>document.getElementById(id);
   let LAST_GUEST=null;
   const MIN_MBIT=0.064;
+  const INPUT_DRAFTS=new Map();
+  const GUEST_FORM_IDS=new Set(['guestQuota','guestDown','guestUp','guestMax']);
+  const GUEST_FORM_DIRTY=new Set();
 
   function kb(v){
     v=Number(v||0);
@@ -31,6 +34,28 @@
   function roleName(r){return r==='guest'?'Guest':r==='managed'?'Managed':r==='existing_at_activation'?'متصل قبل تفعيل Guest':'Unassigned'}
   function roleClass(r){return r==='guest'?'ok':r==='managed'?'':'existing_at_activation'?'warn':''}
   function storedFromInput(id){return toKbitFromMbps($q(id)?.value,{allowInherit:true})}
+  function isDeviceSpeedInput(el){return !!(el&&el.id&&/^[gc]\d+(?:Down|Up)$/.test(el.id))}
+  function draftValue(id,fallback){return INPUT_DRAFTS.has(id)?INPUT_DRAFTS.get(id):String(fallback??'')}
+  function attrValue(v){return String(v??'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+  function setServerValue(id,value){
+    const el=$q(id);if(!el)return;
+    if(GUEST_FORM_DIRTY.has(id)||document.activeElement===el)return;
+    el.value=value;
+  }
+  function clearGuestFormDrafts(){GUEST_FORM_DIRTY.clear()}
+  function clearDeviceDrafts(id){
+    for(const p of ['g'+id,'c'+id])for(const s of ['Down','Up'])INPUT_DRAFTS.delete(p+s);
+  }
+  function editorFocusedInside(box){
+    const el=document.activeElement;
+    return !!(box&&el&&box.contains(el)&&isDeviceSpeedInput(el));
+  }
+
+  document.addEventListener('input',e=>{
+    const el=e.target;
+    if(isDeviceSpeedInput(el))INPUT_DRAFTS.set(el.id,el.value);
+    if(el&&GUEST_FORM_IDS.has(el.id))GUEST_FORM_DIRTY.add(el.id);
+  },true);
 
   function activateGuestTab(){
     document.querySelectorAll('#tabs button').forEach(x=>x.classList.remove('active'));
@@ -55,8 +80,8 @@
           <h2>Guest Mode</h2>
           <label><input id="guestEnabled" type="checkbox"> تفعيل Guest Mode</label>
           <label>Guest Quota GB<input id="guestQuota" type="number" min="0" step="0.1"></label>
-          <label>Default Download Mbps<input id="guestDown" type="number" min="0" step="0.1" placeholder="مثال: 2 = 2 Mbps"></label>
-          <label>Default Upload Mbps<input id="guestUp" type="number" min="0" step="0.1" placeholder="مثال: 0.5 = 500 kbit"></label>
+          <label>Default Download Mbps<input id="guestDown" type="number" min="0" step="0.001" inputmode="decimal" placeholder="مثال: 2 = 2 Mbps"></label>
+          <label>Default Upload Mbps<input id="guestUp" type="number" min="0" step="0.001" inputmode="decimal" placeholder="مثال: 0.5 = 500 kbit"></label>
           <label>Max Guest Devices<input id="guestMax" type="number" min="1" max="100" step="1"></label>
           <small>السرعة هنا Mbps وبشكل Per Guest وليست Shared Pool. 0 = Unlimited. أقل Limit موجب هو 0.064 Mbps.</small>
           <div class="toolbar">
@@ -88,13 +113,14 @@
   }
 
   function speedInputs(x,prefix){
-    const downVal=mbitValueFromKbit(x.stored_down_kbit),upVal=mbitValueFromKbit(x.stored_up_kbit);
+    const downVal=draftValue(prefix+'Down',mbitValueFromKbit(x.stored_down_kbit));
+    const upVal=draftValue(prefix+'Up',mbitValueFromKbit(x.stored_up_kbit));
     const downDefault=mbitFromKbit(x.effective_down_kbit),upDefault=mbitFromKbit(x.effective_up_kbit);
-    return `<label>Download Mbps<input id="${prefix}Down" type="number" min="0" step="0.1" value="${downVal}" placeholder="Default: ${downDefault} Mbps"></label><label>Upload Mbps<input id="${prefix}Up" type="number" min="0" step="0.1" value="${upVal}" placeholder="Default: ${upDefault} Mbps"></label>`;
+    return `<label>Download Mbps<input id="${prefix}Down" type="number" min="0" step="0.001" inputmode="decimal" value="${attrValue(downVal)}" placeholder="Default: ${downDefault} Mbps"></label><label>Upload Mbps<input id="${prefix}Up" type="number" min="0" step="0.001" inputmode="decimal" value="${attrValue(upVal)}" placeholder="Default: ${upDefault} Mbps"></label>`;
   }
 
   function renderActiveGuests(g){
-    const box=$q('activeGuests');if(!box)return;
+    const box=$q('activeGuests');if(!box||editorFocusedInside(box))return;
     const guests=g.active_guests||[];
     if(!guests.length){box.innerHTML='<div class="card muted">لا توجد أجهزة Guest متصلة حالياً.</div>';return}
     box.innerHTML=guests.map(x=>{
@@ -105,7 +131,7 @@
   }
 
   function renderConnected(g){
-    const box=$q('connectedGuestDevices');if(!box)return;
+    const box=$q('connectedGuestDevices');if(!box||editorFocusedInside(box))return;
     const rows=g.connected||[];
     if(!rows.length){box.innerHTML='<div class="card muted">لا توجد Wi-Fi stations متصلة حالياً.</div>';return}
     box.innerHTML=rows.map(x=>{
@@ -122,11 +148,11 @@
   async function loadGuestControlCenter(){
     try{
       const j=await api('/api/diagnostics');const g=j.guest_mode||{};LAST_GUEST=g;
-      if($q('guestEnabled'))$q('guestEnabled').checked=!!g.enabled;
-      if($q('guestQuota'))$q('guestQuota').value=g.quota_gb??0.5;
-      if($q('guestDown'))$q('guestDown').value=mbitFromKbit(g.speed_down_kbit??1024);
-      if($q('guestUp'))$q('guestUp').value=mbitFromKbit(g.speed_up_kbit??256);
-      if($q('guestMax'))$q('guestMax').value=g.max_devices??10;
+      if($q('guestEnabled')&&document.activeElement!==$q('guestEnabled'))$q('guestEnabled').checked=!!g.enabled;
+      setServerValue('guestQuota',g.quota_gb??0.5);
+      setServerValue('guestDown',mbitFromKbit(g.speed_down_kbit??1024));
+      setServerValue('guestUp',mbitFromKbit(g.speed_up_kbit??256));
+      setServerValue('guestMax',g.max_devices??10);
       renderGuestShaping(g.shaping||j.shaping||{});renderActiveGuests(g);renderConnected(g);
     }catch(e){setApplyState(esc(e.message),'bad')}
   }
@@ -145,6 +171,7 @@
     try{
       setApplyState('Saving Guest Mode…');
       await api('/api/settings',{guest:guestPayload(false)});
+      clearGuestFormDrafts();
       await refreshAll();await loadGuestControlCenter();
       setApplyState('Guest Mode saved. الأجهزة المتصلة قبل لحظة التفعيل لم يتم تحويلها إلى Guests.','ok');
     }catch(e){setApplyState('Failed: '+esc(e.message),'bad')}
@@ -155,6 +182,7 @@
     try{
       setApplyState('Applying Guest settings to ALL Guests…');
       await api('/api/settings',{guest:guestPayload(true),features:{speed_limits:true}});
+      clearGuestFormDrafts();
       await refreshAll();
       const j=await api('/api/diagnostics'),g=j.guest_mode||{};LAST_GUEST=g;
       renderGuestShaping(g.shaping||j.shaping||{});renderActiveGuests(g);renderConnected(g);
@@ -168,6 +196,7 @@
       const down=storedFromInput(prefix+'Down'),up=storedFromInput(prefix+'Up');
       setApplyState(`Applying speed for device ${id}…`);
       await api('/api/device/update',{id,speed_down_kbit:down,speed_up_kbit:up});
+      clearDeviceDrafts(id);
       await refreshAll();await loadGuestControlCenter();
       const x=(LAST_GUEST?.connected||[]).find(d=>Number(d.device_id)===Number(id));
       if(LAST_GUEST&&!LAST_GUEST.shaping_healthy&&(x&&(x.effective_down_kbit>0||x.effective_up_kbit>0)))throw Error(LAST_GUEST.shaping_error||'Kernel verification failed; Internet restored without shaping');
@@ -176,12 +205,12 @@
   }
 
   async function resetGuestDefault(id){
-    try{setApplyState(`Resetting Guest ${id} to defaults…`);await api('/api/device/update',{id,speed_down_kbit:0,speed_up_kbit:0});await refreshAll();await loadGuestControlCenter();setApplyState(`Guest ${id}: Guest defaults applied ✅`,'ok')}catch(e){setApplyState(esc(e.message),'bad')}
+    try{setApplyState(`Resetting Guest ${id} to defaults…`);await api('/api/device/update',{id,speed_down_kbit:0,speed_up_kbit:0});clearDeviceDrafts(id);await refreshAll();await loadGuestControlCenter();setApplyState(`Guest ${id}: Guest defaults applied ✅`,'ok')}catch(e){setApplyState(esc(e.message),'bad')}
   }
 
   async function removeFromGuest(id){
     if(!confirm('إخراج الجهاز من Guest Mode؟ سيظل متصلاً بالـWi-Fi ولن يتم حذفه أو إضافته للـDeny List.'))return;
-    try{await api('/api/device/update',{id,is_guest:0,user_id:null,speed_down_kbit:0,speed_up_kbit:0,enabled:1});await refreshAll();await loadGuestControlCenter();setApplyState(`Device ${id} moved to Unassigned ✅`,'ok')}catch(e){setApplyState(esc(e.message),'bad')}
+    try{await api('/api/device/update',{id,is_guest:0,user_id:null,speed_down_kbit:0,speed_up_kbit:0,enabled:1});clearDeviceDrafts(id);await refreshAll();await loadGuestControlCenter();setApplyState(`Device ${id} moved to Unassigned ✅`,'ok')}catch(e){setApplyState(esc(e.message),'bad')}
   }
 
   function moveGuestToUser(id){
@@ -190,7 +219,7 @@
     modal(`<h3>Move Guest to User</h3><select id="guestMoveUser">${users.map(u=>`<option value="${u.id}">${esc(u.name)}</option>`).join('')}</select><button onclick="confirmMoveGuest(${id})">نقل</button>`);
   }
   async function confirmMoveGuest(id){
-    try{const uid=+$q('guestMoveUser').value;await api('/api/device/update',{id,is_guest:0,user_id:uid,speed_down_kbit:0,speed_up_kbit:0,enabled:1});closeModal();await refreshAll();await loadGuestControlCenter();setApplyState(`Device ${id} moved to User ✅`,'ok')}catch(e){setApplyState(esc(e.message),'bad')}
+    try{const uid=+$q('guestMoveUser').value;await api('/api/device/update',{id,is_guest:0,user_id:uid,speed_down_kbit:0,speed_up_kbit:0,enabled:1});clearDeviceDrafts(id);closeModal();await refreshAll();await loadGuestControlCenter();setApplyState(`Device ${id} moved to User ✅`,'ok')}catch(e){setApplyState(esc(e.message),'bad')}
   }
   async function blockGuest(id){
     if(!confirm('حظر الإنترنت عن هذا الجهاز؟'))return;
