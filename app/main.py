@@ -4,7 +4,7 @@ from http.cookies import SimpleCookie
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
-from . import auth, config, db, network, diagnostics, usage_tracker
+from . import auth, config, db, network, diagnostics, usage_tracker, maintenance
 from .dnsproxy import DNSProxy
 
 ROOT=Path(__file__).resolve().parent.parent; WEB=ROOT/'web'; LOCK=threading.RLock(); SESSIONS={}; FAILS={}; BANS={}; REQS={}; DNS=None
@@ -63,6 +63,11 @@ def scan(c):
 
 def apply(c):
     us=db.users();ds=db.devices();rebuilt=network.sync_rules(c,ds,network.blocked(c,us,ds));network.shaping(c,ds,us);network.sync_dnsmasq(c);return rebuilt
+
+def maintenance_refresh(kind,c):
+    global DNS
+    if kind in ('policy','policy_dns'):apply(c)
+    if kind in ('dns','policy_dns') and DNS:DNS.update_config(c)
 
 def maybe_reset(c):
     b=c['bundle']
@@ -138,6 +143,9 @@ class Handler(SimpleHTTPRequestHandler):
             return self.json({'users':us,'devices':ds,'events':db.events(80),'alerts':db.alerts(50),'daily':usage_tracker.daily_history(),'bundle':{**c['bundle'],'used_bytes':used,'gateway_bytes':gateway_bytes},'network':c['network'],'wifi':wifi_view(c),'web':c['web'],'mac_rules':db.mac_rules(),'system':system_info(c),'dns':c.get('dns',{}),'updates':{k:v for k,v in c.get('updates',{}).items() if k!='repo'}})
         if p=='/api/settings':return self.json(mask_config(c))
         if p=='/api/usage/live':return self.json(usage_tracker.snapshot())
+        if p in ('/api/maintenance/overview','/api/maintenance/tables'):return self.json(maintenance.overview())
+        if p=='/api/maintenance/table':
+            name=(q.get('name') or [''])[0];limit=int((q.get('limit') or ['50'])[0]);offset=int((q.get('offset') or ['0'])[0]);return self.json(maintenance.table_rows(name,limit,offset))
         if p=='/api/diagnostics':
             snap=diagnostics.snapshot(c,((q.get('ping') or ['0'])[0]=='1'));snap['usage_tracker']=usage_tracker.diagnostics();return self.json(snap)
         if p=='/api/update/status':return self.json(update_status(c,False))
@@ -168,6 +176,16 @@ class Handler(SimpleHTTPRequestHandler):
             t=secrets.token_urlsafe(32);SESSIONS[t]=time.time()+28800;return self.json({'ok':True},cookie=f'qg_session={t}; Path=/; HttpOnly; SameSite=Strict')
         if not self.need():return
         try:
+            if p=='/api/maintenance/delete-records':
+                r=maintenance.delete_records(str(d.get('table','')),d.get('keys',[]),str(d.get('confirm','')));maintenance_refresh(r.get('refresh'),c);return self.json(r)
+            if p=='/api/maintenance/clear-table':
+                r=maintenance.clear_table(str(d.get('table','')));maintenance_refresh(r.get('refresh'),c);return self.json(r)
+            if p=='/api/maintenance/reset':
+                r=maintenance.reset(d.get('action'),d.get('user_id'));maintenance_refresh(r.get('refresh'),c);return self.json(r)
+            if p=='/api/maintenance/vacuum':return self.json(maintenance.vacuum())
+            if p=='/api/maintenance/backup':return self.json(maintenance.backup())
+            if p=='/api/maintenance/danger':
+                r=maintenance.danger(d.get('action'),d.get('confirm'));maintenance_refresh(r.get('refresh'),c);return self.json(r)
             if p=='/api/users':return self.json({'ok':True,'id':db.create_user(str(d['name'])[:80],float(d.get('quota_gb',0)),int(d.get('speed_down_kbit',0)),int(d.get('speed_up_kbit',0)),str(d.get('quota_mode','fixed')))})
             if p=='/api/user/update':x=dict(d);i=int(x.pop('id'));db.update_user(i,**x);apply(c);return self.json({'ok':True})
             if p=='/api/user/topup':us={u['id']:u for u in db.users()};i=int(d['id']);u=us[i];db.update_user(i,topup_gb=float(u.get('topup_gb') or 0)+float(d.get('gb',0)));return self.json({'ok':True})
