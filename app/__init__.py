@@ -36,3 +36,8 @@ _quota.install()
 # - duplicate IP rows cannot generate conflicting tc/nft marks.
 from . import shaping_policy as _shaping_policy
 _shaping_policy.install()
+
+# Finally extend the already-composed user update path with quota-reset support
+# and append lightweight per-user quota fields to /api/usage/live.
+from . import quota_integration as _quota_integration
+_quota_integration.install()
