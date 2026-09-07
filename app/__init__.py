@@ -2,8 +2,13 @@
 # This keeps the existing network module/API stable while allowing shaping
 # to be upgraded independently and verified on antiX.
 from . import network as _network
+from . import nft_comment_compat as _nft_comment_compat
 from . import shaping as _shaping
 from . import shaping_compat as _shaping_compat
+
+# antiX nft requires rule comments containing ':' to stay quoted as nft string
+# literals. Install the compatibility shim before any firewall rules are built.
+_nft_comment_compat.install()
 
 # antiX can ship an older iproute2 whose `tc ... show` text differs from newer
 # builds. Install a tolerant verifier before the shaping engine is exposed.
