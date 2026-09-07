@@ -1,7 +1,7 @@
 from __future__ import annotations
 import os, sqlite3, time
 from pathlib import Path
-from . import db, config, usage_tracker, quota, network, shaping_policy
+from . import db, config, usage_tracker, quota
 
 TABLE_META={
  'users':('accounts','danger','Users, quota configuration and per-user policy.','danger'),
@@ -27,7 +27,7 @@ BACKUP_DIR=Path('/var/lib/quotagate/backups')
 
 def _tables(cx=None):
     own=False
-    if cx is None: cx=db.con();own=True
+    if cx is None:cx=db.con();own=True
     try:return [r['name'] for r in cx.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")]
     finally:
         if own:cx.close()
@@ -65,74 +65,8 @@ def _refresh_kind(name):
     if name=='dns_rules':return 'dns'
     if name in ('mac_rules','firewall_rules','port_forwards','users','devices'):return 'policy'
     return 'none'
-
-def delete_records(name,keys):
-    if name=='settings':raise ValueError('settings is view-only')
-    if name not in TABLE_META:raise ValueError('unknown table is view-only')
-    if not isinstance(keys,list) or not keys:raise ValueError('keys required')
-    with db.L,db.con() as cx:
-        name=_valid_table(name,cx);cols=_schema(cx,name);pk=_pk_columns(cols)
-        if not pk:raise ValueError('table has no supported primary key')
-        deleted=0
-        for item in keys:
-            if not isinstance(item,dict) or any(k not in item for k in pk):raise ValueError('invalid primary key')
-            where=' AND '.join(f'{_qident(k)}=?' for k in pk);cur=cx.execute(f'DELETE FROM {_qident(name)} WHERE {where}',[item[k] for k in pk]);deleted+=max(0,int(cur.rowcount or 0))
-    db.event(f'Maintenance: deleted {deleted} record(s) from {name}','warning');return {'ok':True,'deleted':deleted,'refresh':_refresh_kind(name)}
-
-def clear_table(name):
-    policy=_meta(name)['policy']
-    if name not in TABLE_META:raise ValueError('unknown table is view-only')
-    if policy in ('view','smart','danger'):raise ValueError('use a specific maintenance action for this table')
-    with db.L,db.con() as cx:
-        name=_valid_table(name,cx);before=int(cx.execute(f'SELECT COUNT(*) n FROM {_qident(name)}').fetchone()['n']);cx.execute(f'DELETE FROM {_qident(name)}')
-    db.event(f'Maintenance: cleared {before} record(s) from {name}','warning');return {'ok':True,'deleted':before,'refresh':_refresh_kind(name)}
-
-def reset_live_baseline():
-    tracker=usage_tracker.TRACKER;devices=shaping_policy._sanitize_devices(db.devices());owners={int(d['id']) for d in devices};raw=network.counters();cur={k:int(v) for k,v in raw.items() if int(k[0]) in owners}
-    with tracker._lock:
-        tracker._prev=cur;tracker._live={did:{'up':0.0,'down':0.0} for did in owners};tracker._gateway_live={'up':0.0,'down':0.0};tracker._last_sample_mono=time.monotonic();tracker._last_poll_mono=tracker._last_sample_mono
-    return len(owners)
-
-def reset(action,user_id=None):
-    action=str(action or '');c=config.load();today=db.day();month=db.period();deleted=0;refresh='usage'
-    if action=='live_baseline':
-        n=reset_live_baseline();db.event(f'Maintenance: reset live usage baseline for {n} device(s)','warning');return {'ok':True,'deleted':0,'refresh':'none'}
-    if action=='today_device':
-        with db.L,db.con() as cx:cur=cx.execute('DELETE FROM usage_daily WHERE day=?',(today,));deleted=max(0,int(cur.rowcount or 0))
-        reset_live_baseline()
-    elif action=='today_gateway':
-        with db.L,db.con() as cx:cur=cx.execute('DELETE FROM gateway_usage_daily WHERE day=?',(today,));deleted=max(0,int(cur.rowcount or 0))
-        reset_live_baseline()
-    elif action=='month_device':
-        with db.L,db.con() as cx:cur=cx.execute('DELETE FROM usage_monthly WHERE period=?',(month,));deleted=max(0,int(cur.rowcount or 0))
-        reset_live_baseline()
-    elif action=='month_gateway':
-        with db.L,db.con() as cx:cur=cx.execute('DELETE FROM gateway_usage_monthly WHERE period=?',(month,));deleted=max(0,int(cur.rowcount or 0))
-        reset_live_baseline()
-    elif action=='user_quota':
-        if user_id is None:raise ValueError('user_id required')
-        quota.reset_user(int(user_id));refresh='quota'
-    elif action=='all_current_quotas':
-        for u in db.users():quota.reset_user(int(u['id']))
-        refresh='quota'
-    elif action=='quota_thresholds':
-        key=quota.cycle_key(c)
-        with db.L,db.con() as cx:cur=cx.execute('UPDATE user_quota_state SET last_threshold=0 WHERE cycle_key=?',(key,));deleted=max(0,int(cur.rowcount or 0))
-        quota.reconcile_all(c,refresh=True);refresh='quota'
-    elif action=='current_quota_cycle':
-        key=quota.cycle_key(c)
-        with db.L,db.con() as cx:cur=cx.execute('DELETE FROM user_usage_cycle WHERE cycle_key=?',(key,));deleted=max(0,int(cur.rowcount or 0));cx.execute('DELETE FROM user_quota_state WHERE cycle_key=?',(key,))
-        quota.reconcile_all(c,refresh=True);refresh='quota'
-    else:raise ValueError('unknown reset action')
-    db.event(f'Maintenance: {action} affected {deleted} record(s)','warning');return {'ok':True,'deleted':deleted,'refresh':refresh}
-
-def vacuum():
-    before=db.DB.stat().st_size if db.DB.exists() else 0
-    with db.L,db.con() as cx:
-        try:cx.execute('PRAGMA wal_checkpoint(TRUNCATE)')
-        except Exception:pass
-        cx.execute('VACUUM')
-    after=db.DB.stat().st_size if db.DB.exists() else 0;db.event('Maintenance: VACUUM completed','info');return {'ok':True,'before_bytes':before,'after_bytes':after}
+def _require_token(confirm,expected):
+    if str(confirm or '')!=expected:raise ValueError('confirmation token required: '+expected)
 
 def backup():
     BACKUP_DIR.mkdir(parents=True,exist_ok=True,mode=0o700);os.chmod(BACKUP_DIR,0o700);stamp=time.strftime('%Y%m%d-%H%M%S');target=BACKUP_DIR/f'quotagate-{stamp}.db'
@@ -141,3 +75,107 @@ def backup():
         try:src.backup(dst)
         finally:dst.close();src.close()
     os.chmod(target,0o600);db.event(f'Maintenance: database backup created {target.name}','info');return {'ok':True,'name':target.name,'size_bytes':target.stat().st_size}
+
+def delete_records(name,keys,confirm=''):
+    if name=='settings':raise ValueError('settings is view-only')
+    if name not in TABLE_META:raise ValueError('unknown table is view-only')
+    if not isinstance(keys,list) or not keys:raise ValueError('keys required')
+    if name in ('users','devices'):_require_token(confirm,'DELETE '+name.upper());backup()
+    with db.con() as cx:
+        name=_valid_table(name,cx);cols=_schema(cx,name);pk=_pk_columns(cols)
+    if not pk:raise ValueError('table has no supported primary key')
+    deleted=0
+    if name=='devices' and pk==['id']:
+        current={int(d['id']):d for d in db.devices()}
+        for item in keys:
+            if not isinstance(item,dict) or 'id' not in item:raise ValueError('invalid primary key')
+            did=int(item['id']);old=current.get(did)
+            if old:db.mac_rule(old['mac'],'blacklist','deleted from Maintenance')
+            db.delete_device(did);deleted+=1
+    elif name=='users' and pk==['id']:
+        for item in keys:
+            if not isinstance(item,dict) or 'id' not in item:raise ValueError('invalid primary key')
+            db.delete_user(int(item['id']));deleted+=1
+    else:
+        with db.L,db.con() as cx:
+            for item in keys:
+                if not isinstance(item,dict) or any(k not in item for k in pk):raise ValueError('invalid primary key')
+                where=' AND '.join(f'{_qident(k)}=?' for k in pk);cur=cx.execute(f'DELETE FROM {_qident(name)} WHERE {where}',[item[k] for k in pk]);deleted+=max(0,int(cur.rowcount or 0))
+    if name in ('user_usage_cycle','user_quota_state'):quota.reconcile_all(config.load(),refresh=True)
+    db.event(f'Maintenance: deleted {deleted} record(s) from {name}','warning');return {'ok':True,'deleted':deleted,'refresh':_refresh_kind(name)}
+
+def clear_table(name):
+    if name not in TABLE_META:raise ValueError('unknown table is view-only')
+    policy=_meta(name)['policy']
+    if policy in ('view','smart','danger'):raise ValueError('use a specific maintenance action for this table')
+    with db.L,db.con() as cx:
+        name=_valid_table(name,cx);before=int(cx.execute(f'SELECT COUNT(*) n FROM {_qident(name)}').fetchone()['n']);cx.execute(f'DELETE FROM {_qident(name)}')
+    db.event(f'Maintenance: cleared {before} record(s) from {name}','warning');return {'ok':True,'deleted':before,'refresh':_refresh_kind(name)}
+
+def _delete(sql,args=()):
+    with db.L,db.con() as cx:
+        cur=cx.execute(sql,args);return max(0,int(cur.rowcount or 0))
+
+def reset(action,user_id=None):
+    action=str(action or '');c=config.load();today=db.day();month=db.period();deleted=0;refresh='usage'
+    if action=='live_baseline':
+        info=usage_tracker.reset_baseline();db.event(f'Maintenance: reset live usage baseline for {info["tracked_devices"]} device(s)','warning');return {'ok':True,'deleted':0,'refresh':'none'}
+    if action=='today_device':deleted=_delete('DELETE FROM usage_daily WHERE day=?',(today,));usage_tracker.reset_baseline()
+    elif action=='today_gateway':deleted=_delete('DELETE FROM gateway_usage_daily WHERE day=?',(today,));usage_tracker.reset_baseline()
+    elif action=='month_device':deleted=_delete('DELETE FROM usage_monthly WHERE period=?',(month,));usage_tracker.reset_baseline()
+    elif action=='month_gateway':deleted=_delete('DELETE FROM gateway_usage_monthly WHERE period=?',(month,));usage_tracker.reset_baseline()
+    elif action=='all_daily':deleted=_delete('DELETE FROM usage_daily');usage_tracker.reset_baseline()
+    elif action=='all_monthly':deleted=_delete('DELETE FROM usage_monthly');usage_tracker.reset_baseline()
+    elif action=='all_gateway_daily':deleted=_delete('DELETE FROM gateway_usage_daily');usage_tracker.reset_baseline()
+    elif action=='all_gateway_monthly':deleted=_delete('DELETE FROM gateway_usage_monthly');usage_tracker.reset_baseline()
+    elif action=='clear_seen_alerts':deleted=_delete('DELETE FROM alerts WHERE seen=1');refresh='none'
+    elif action=='dns_today':
+        start=int(time.mktime(time.strptime(today,'%Y-%m-%d')));deleted=_delete('DELETE FROM dns_history WHERE ts>=?',(start,));refresh='none'
+    elif action=='dns_old_7':deleted=_delete('DELETE FROM dns_history WHERE ts<?',(int(time.time())-7*86400,));refresh='none'
+    elif action=='user_quota':
+        if user_id is None:raise ValueError('user_id required')
+        quota.reset_user(int(user_id));refresh='quota'
+    elif action=='all_current_quotas':
+        for u in db.users():quota.reset_user(int(u['id']))
+        refresh='quota'
+    elif action=='quota_thresholds':
+        key=quota.cycle_key(c);deleted=_delete('UPDATE user_quota_state SET last_threshold=0 WHERE cycle_key=?',(key,));quota.reconcile_all(c,refresh=True);refresh='quota'
+    elif action=='current_quota_cycle':
+        key=quota.cycle_key(c)
+        with db.L,db.con() as cx:
+            cur=cx.execute('DELETE FROM user_usage_cycle WHERE cycle_key=?',(key,));deleted=max(0,int(cur.rowcount or 0));cx.execute('DELETE FROM user_quota_state WHERE cycle_key=?',(key,))
+        quota.reconcile_all(c,refresh=True);refresh='quota'
+    elif action=='quota_history':key=quota.cycle_key(c);deleted=_delete('DELETE FROM user_usage_cycle WHERE cycle_key<>?',(key,));refresh='quota'
+    elif action=='quota_state_history':key=quota.cycle_key(c);deleted=_delete('DELETE FROM user_quota_state WHERE cycle_key<>?',(key,));refresh='quota'
+    else:raise ValueError('unknown reset action')
+    db.event(f'Maintenance: {action} affected {deleted} record(s)','warning');return {'ok':True,'deleted':deleted,'refresh':refresh}
+
+def danger(action,confirm):
+    action=str(action or '');tokens={'delete_all_devices':'DELETE DEVICES','delete_all_users':'DELETE USERS','reset_all_usage':'RESET USAGE','clear_network_rules':'CLEAR NETWORK RULES'}
+    if action not in tokens:raise ValueError('unsupported danger action')
+    _require_token(confirm,tokens[action]);bk=backup();deleted=0;refresh='policy'
+    if action=='delete_all_devices':
+        current=list(db.devices())
+        for d in current:
+            db.mac_rule(d['mac'],'blacklist','deleted from Maintenance danger zone');db.delete_device(int(d['id']));deleted+=1
+    elif action=='delete_all_users':
+        for u in list(db.users()):db.delete_user(int(u['id']));deleted+=1
+    elif action=='reset_all_usage':
+        with db.L,db.con() as cx:
+            for table in ('usage_daily','usage_monthly','gateway_usage_daily','gateway_usage_monthly','user_usage_cycle','user_quota_state'):
+                cur=cx.execute(f'DELETE FROM {_qident(table)}');deleted+=max(0,int(cur.rowcount or 0))
+        usage_tracker.reset_baseline();quota.reconcile_all(config.load(),refresh=True);refresh='quota'
+    elif action=='clear_network_rules':
+        with db.L,db.con() as cx:
+            for table in ('mac_rules','dns_rules','firewall_rules','port_forwards'):
+                cur=cx.execute(f'DELETE FROM {_qident(table)}');deleted+=max(0,int(cur.rowcount or 0))
+        refresh='policy_dns'
+    db.event(f'Maintenance danger: {action} affected {deleted} record(s); backup {bk["name"]}','warning');return {'ok':True,'deleted':deleted,'backup':bk,'refresh':refresh}
+
+def vacuum():
+    before=db.DB.stat().st_size if db.DB.exists() else 0
+    with db.L,db.con() as cx:
+        try:cx.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+        except Exception:pass
+        cx.execute('VACUUM')
+    after=db.DB.stat().st_size if db.DB.exists() else 0;db.event('Maintenance: VACUUM completed','info');return {'ok':True,'before_bytes':before,'after_bytes':after}
