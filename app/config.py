@@ -6,7 +6,7 @@ DEFAULT={
  'version':'3.1.0',
  'network':{
    'wan_interface':'eth0','lan_interface':'wlan0','lan_ip':'192.168.2.1','lan_prefix':24,'client_net':'192.168.2.0/24','uplink_net':'192.168.1.0/24',
-   'pool_start':'192.168.2.100','pool_end':'192.168.2.200','upstream_dns':['1.1.1.1','8.8.8.8'],
+   'pool_start':'192.168.2.100','pool_end':'192.168.2.200','upstream_dns':['1.1.1.1','8.8.8.8'],'dns_fallback':'192.168.1.1',
    'line_down_mbit':12.0,'line_up_mbit':1.5,'vpn_share':False,'vpn_interface':'tun0','vpn_auto_detect':True,'dmz_ip':'',
    'stop_new_connections':False,'decline_random_macs':False,'default_new_enabled':False
  },
@@ -17,6 +17,7 @@ DEFAULT={
  'security':{'auto_ban':True,'failed_login_limit':8,'failed_login_window':300,'ban_seconds':900},
  'features':{'speed_limits':True,'dns_proxy':True,'dns_history':True,'firewall':True,'pppoe_wan':False},
  'dns':{'history_days':7,'max_history_rows':100000,'family_mode':False,'presets':{'ads_tracking':False,'social':False,'streaming':False,'gambling':False,'adult':False}},
+ 'usage':{'enabled':True,'poll_seconds':2,'speed_smoothing_alpha':0.4},
  'diagnostics':{'internet_target':'1.1.1.1'},
  'updates':{'repo':'https://github.com/waleedzidan2020/Quotagate.git','branch':'main','auto_check':False,'last_check':0,'available_commit':''},
  'wan':{'mode':'lan','pppoe_user':'','pppoe_password':'','interface':'ppp0','auto_renew_minutes':0},
