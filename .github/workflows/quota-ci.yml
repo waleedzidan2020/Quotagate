@@ -1,0 +1,103 @@
+name: QuotaGate user quota checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  quota:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python and JavaScript syntax
+        run: |
+          python3 -m compileall -q app
+          node --check web/quota-ui.js
+          node --check web/live-usage.js
+          node --check web/app.js
+      - name: Per-user quota semantics
+        run: |
+          python3 - <<'PY'
+          import tempfile
+          from pathlib import Path
+          from app import config, db, network, quota
+
+          GB=1024**3
+          td=tempfile.TemporaryDirectory();db.DB=Path(td.name)/'q.db'
+          cfg={
+            'bundle':{'total_gb':100,'bundle_type':'renew_day','reset_day':1,'auto_reset':True},
+            'network':{'client_net':'192.168.2.0/24','uplink_net':'192.168.1.0/24','lan_interface':'wlan0','wan_interface':'eth0','vpn_share':False},
+          }
+          config.load=lambda:cfg
+          refresh=[];quota._refresh_policy=lambda c:refresh.append('policy')
+          db.init()
+
+          # Fixed quota shared across multiple devices.
+          a=db.create_user('A',10,0,0,'fixed')
+          d1,_=db.upsert_device('aa:bb:cc:dd:ee:01','192.168.2.10','phone');db.update_device(d1,user_id=a,enabled=1)
+          d2,_=db.upsert_device('aa:bb:cc:dd:ee:02','192.168.2.11','laptop');db.update_device(d2,user_id=a,enabled=1)
+          db.add_usage_batch([(d1,3*GB,0),(d2,4*GB,0)])
+          ua=next(u for u in db.users() if u['id']==a)
+          assert ua['quota_used_bytes']==7*GB and not ua['quota_exceeded']
+
+          # Exactly at quota blocks and causes one event-driven policy refresh.
+          before=len(refresh);db.add_usage_batch([(d1,3*GB,0)])
+          ua=next(u for u in db.users() if u['id']==a)
+          assert ua['quota_used_bytes']==10*GB and ua['quota_exceeded']
+          assert len(refresh)==before+1
+
+          # Further traffic while already exceeded does not rebuild policy again.
+          before=len(refresh);db.add_usage_batch([(d1,1000,0)]);assert len(refresh)==before
+
+          # Top-up restores quota immediately; manual device block stays separate.
+          db.update_device(d1,blocked_manual=1)
+          before=len(refresh);db.update_user(a,topup_gb=5)
+          ua=next(u for u in db.users() if u['id']==a)
+          assert not ua['quota_exceeded'] and len(refresh)==before+1
+          blocked=network.blocked(cfg,db.users(),db.devices())
+          assert '192.168.2.10' in blocked
+          db.update_device(d1,blocked_manual=0)
+
+          # Unlimited still accounts traffic but never quota-blocks.
+          un=db.create_user('Unlimited',0,0,0,'unlimited')
+          du,_=db.upsert_device('aa:bb:cc:dd:ee:03','192.168.2.12','unlimited-device');db.update_device(du,user_id=un,enabled=1)
+          db.add_usage_batch([(du,1000*GB,0)])
+          uu=next(u for u in db.users() if u['id']==un)
+          assert uu['quota_used_bytes']==1000*GB and not uu['quota_exceeded'] and uu['quota_status']=='unlimited'
+
+          # Reset quota usage preserves historical device usage.
+          with db.con() as c:
+            hist_before=c.execute('SELECT up_bytes+down_bytes n FROM usage_monthly WHERE device_id=?',(d1,)).fetchone()['n']
+          db.update_user(a,quota_reset=True)
+          ua=next(u for u in db.users() if u['id']==a);assert ua['quota_used_bytes']==0
+          with db.con() as c:
+            hist_after=c.execute('SELECT up_bytes+down_bytes n FROM usage_monthly WHERE device_id=?',(d1,)).fetchone()['n']
+          assert hist_after==hist_before
+          db.add_usage_batch([(d1,2*GB,0)])
+          ua=next(u for u in db.users() if u['id']==a);assert ua['quota_used_bytes']==2*GB
+
+          # Attribution is fixed at accounting time: moving a device does not move old bytes.
+          b=db.create_user('B',20,0,0,'fixed')
+          dx,_=db.upsert_device('aa:bb:cc:dd:ee:04','192.168.2.13','move-me');db.update_device(dx,user_id=a,enabled=1)
+          db.add_usage_batch([(dx,GB,0)]);db.update_device(dx,user_id=b);db.add_usage_batch([(dx,GB,0)])
+          key=quota.cycle_key(cfg)
+          with db.con() as c:
+            ra=c.execute('SELECT up_bytes+down_bytes n FROM user_usage_cycle WHERE user_id=? AND cycle_key=?',(a,key)).fetchone()['n']
+            rb=c.execute('SELECT up_bytes+down_bytes n FROM user_usage_cycle WHERE user_id=? AND cycle_key=?',(b,key)).fetchone()['n']
+          assert ra>=3*GB and rb==GB
+
+          # Threshold alerts are deduplicated after crossing.
+          t=db.create_user('Threshold',1,0,0,'fixed')
+          dt1,_=db.upsert_device('aa:bb:cc:dd:ee:05','192.168.2.14','threshold');db.update_device(dt1,user_id=t,enabled=1)
+          db.add_usage_batch([(dt1,int(.81*GB),0)]);db.add_usage_batch([(dt1,int(.01*GB),0)])
+          with db.con() as c:
+            n=c.execute("SELECT COUNT(*) n FROM alerts WHERE kind='quota-warning' AND message LIKE 'User Threshold %'").fetchone()['n']
+          assert n==1
+
+          # Renewal cycle key follows configured reset day.
+          cfg['bundle']['reset_day']=12
+          import time
+          assert quota.cycle_key(cfg,time.mktime((2026,9,11,12,0,0,0,0,-1)))=='2026-08-12'
+          assert quota.cycle_key(cfg,time.mktime((2026,9,12,12,0,0,0,0,-1)))=='2026-09-12'
+          print('per-user quota semantics: OK')
+          PY
