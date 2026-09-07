@@ -83,6 +83,7 @@
     $u('usageGatewayLiveUp').textContent=formatSpeed(g.live_up_mbps);
     const st=$u('usageTrackerState');if(st){st.textContent=t.running?`Live • ${t.poll_seconds}s`:'Stopped';st.className='pill '+(t.running?'ok':'bad')}
     updateDevices(j.devices||[]);
+    if(typeof window.updateLiveQuota==='function')window.updateLiveQuota(j.users||[]);
   }
 
   async function refreshUsage(){
