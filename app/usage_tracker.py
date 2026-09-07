@@ -59,6 +59,21 @@ class UsageTracker:
     def stop(self):
         self._stop.set()
 
+    def reset_baseline(self):
+        """Make current nft counters the new baseline without recounting old bytes."""
+        devices = shaping_policy._sanitize_devices(db.devices())
+        owners = {int(d['id']): d for d in devices}
+        raw = network.counters()
+        cur = {k: int(v) for k, v in raw.items() if int(k[0]) in owners}
+        now_mono = time.monotonic()
+        with self._lock:
+            self._prev = cur
+            self._live = {did: {'up': 0.0, 'down': 0.0} for did in owners}
+            self._gateway_live = {'up': 0.0, 'down': 0.0}
+            self._last_sample_mono = now_mono
+            self._last_poll_mono = now_mono
+        return {'tracked_devices': len(owners), 'counter_rules': len(cur)}
+
     def _log_error(self, message):
         now = time.time()
         with self._lock:
@@ -142,8 +157,6 @@ class UsageTracker:
                 smooth_down = alpha * instant_down + (1.0 - alpha) * float(old_speed.get('down', 0.0))
             new_live[did] = {'up': smooth_up, 'down': smooth_down}
 
-        # Persist only positive deltas. The first sample after service start,
-        # a missing rule, or a counter reset is baseline-only and writes zero.
         if rows:
             db.add_usage_batch(rows)
         if gateway_up or gateway_down:
@@ -159,9 +172,6 @@ class UsageTracker:
                 'down': alpha * inst_gdown + (1.0 - alpha) * float(gateway_before.get('down', 0.0)),
             }
 
-        # Keep only counters that currently exist. If a rule disappears and
-        # later returns, its first value becomes a fresh baseline instead of
-        # being counted as new traffic.
         with self._lock:
             self._prev = cur
             self._live = new_live
@@ -279,6 +289,10 @@ def start():
 
 def stop():
     TRACKER.stop()
+
+
+def reset_baseline():
+    return TRACKER.reset_baseline()
 
 
 def snapshot():
