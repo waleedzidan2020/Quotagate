@@ -22,7 +22,15 @@ _network.clear_shaping = _shaping.clear
 from . import guestmode as _guestmode
 _guestmode.install()
 
-# Install policy guards after Guest Mode so the wrappers compose correctly:
+# Per-user quota accounting is installed before the policy guard wrappers so
+# db.update_user/create_user composition remains intact. It keeps historical
+# device usage, attributes new deltas to the current user at accounting time,
+# and performs event-driven quota firewall refreshes only on state changes.
+from . import quota as _quota
+_quota.install()
+
+# Install policy guards after Guest Mode and quota accounting so the wrappers
+# compose correctly:
 # - applying user/device/Guest speed limits automatically enables shaping;
 # - invalid placeholder MACs never become devices;
 # - duplicate IP rows cannot generate conflicting tc/nft marks.
