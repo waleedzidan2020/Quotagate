@@ -142,6 +142,8 @@ class UsageTracker:
                 smooth_down = alpha * instant_down + (1.0 - alpha) * float(old_speed.get('down', 0.0))
             new_live[did] = {'up': smooth_up, 'down': smooth_down}
 
+        # Persist only positive deltas. The first sample after service start,
+        # a missing rule, or a counter reset is baseline-only and writes zero.
         if rows:
             db.add_usage_batch(rows)
         if gateway_up or gateway_down:
@@ -285,3 +287,12 @@ def snapshot():
 
 def diagnostics():
     return snapshot()['tracker']
+
+
+def daily_history(n=31):
+    """Gateway daily totals only; avoids double-counting device + gateway rows."""
+    with db.con() as c:
+        return [
+            {'day': r['day'], 'bytes': int(r['up_bytes']) + int(r['down_bytes'])}
+            for r in c.execute('SELECT day,up_bytes,down_bytes FROM gateway_usage_daily ORDER BY day DESC LIMIT ?', (int(n),))
+        ]
