@@ -4,10 +4,10 @@ from http.cookies import SimpleCookie
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
-from . import auth, config, db, network, diagnostics
+from . import auth, config, db, network, diagnostics, usage_tracker
 from .dnsproxy import DNSProxy
 
-ROOT=Path(__file__).resolve().parent.parent; WEB=ROOT/'web'; LOCK=threading.RLock(); SESSIONS={}; FAILS={}; BANS={}; REQS={}; PREV={}; PREV_GATEWAY={'up':0,'down':0}; DNS=None
+ROOT=Path(__file__).resolve().parent.parent; WEB=ROOT/'web'; LOCK=threading.RLock(); SESSIONS={}; FAILS={}; BANS={}; REQS={}; DNS=None
 
 def body(h):
     n=int(h.headers.get('Content-Length','0') or 0)
@@ -83,16 +83,10 @@ def update_status(c,persist=False):
     except Exception as e:return {'ok':False,'error':str(e)[:300]}
 
 def worker():
-    global PREV,PREV_GATEWAY,DNS
+    global DNS
     while True:
         try:
-            c=config.load();maybe_reset(c);scan(c);cur=network.counters();rows=[]
-            for k,val in cur.items():
-                old=PREV.get(k,val);delta=max(0,val-old)
-                if delta:
-                    did,direction=k;rows.append((did,delta if direction=='up' else 0,delta if direction=='down' else 0))
-            db.add_usage_batch(rows);gcur=network.gateway_counters();gup=max(0,int(gcur.get('up',0))-int(PREV_GATEWAY.get('up',gcur.get('up',0))));gdown=max(0,int(gcur.get('down',0))-int(PREV_GATEWAY.get('down',gcur.get('down',0))));db.add_gateway_usage(gup,gdown);PREV=cur;PREV_GATEWAY=gcur
-            if apply(c):PREV=network.counters();PREV_GATEWAY=network.gateway_counters()
+            c=config.load();maybe_reset(c);scan(c);apply(c)
             dcfg=c.get('dns',{});db.prune_dns(dcfg.get('history_days',7),dcfg.get('max_history_rows',100000))
             if DNS:DNS.update_config(c)
             u=c.get('updates',{})
@@ -140,10 +134,12 @@ class Handler(SimpleHTTPRequestHandler):
         if not self.need():return
         c=config.load()
         if p=='/api/status':
-            us=quota_view(c,db.users());ds=db.devices();gu=db.gateway_usage();gateway_bytes=int(gu.get('up_bytes',0))+int(gu.get('down_bytes',0));used=sum(int(u.get('usage_bytes') or 0) for u in us)+gateway_bytes
-            return self.json({'users':us,'devices':ds,'events':db.events(80),'alerts':db.alerts(50),'daily':db.daily(),'bundle':{**c['bundle'],'used_bytes':used,'gateway_bytes':gateway_bytes},'network':c['network'],'wifi':wifi_view(c),'web':c['web'],'mac_rules':db.mac_rules(),'system':system_info(c),'dns':c.get('dns',{}),'updates':{k:v for k,v in c.get('updates',{}).items() if k!='repo'}})
+            us=quota_view(c,db.users());ds=db.devices();gu=db.gateway_usage();gateway_bytes=int(gu.get('up_bytes',0))+int(gu.get('down_bytes',0));used=gateway_bytes
+            return self.json({'users':us,'devices':ds,'events':db.events(80),'alerts':db.alerts(50),'daily':usage_tracker.daily_history(),'bundle':{**c['bundle'],'used_bytes':used,'gateway_bytes':gateway_bytes},'network':c['network'],'wifi':wifi_view(c),'web':c['web'],'mac_rules':db.mac_rules(),'system':system_info(c),'dns':c.get('dns',{}),'updates':{k:v for k,v in c.get('updates',{}).items() if k!='repo'}})
         if p=='/api/settings':return self.json(mask_config(c))
-        if p=='/api/diagnostics':return self.json(diagnostics.snapshot(c,((q.get('ping') or ['0'])[0]=='1')))
+        if p=='/api/usage/live':return self.json(usage_tracker.snapshot())
+        if p=='/api/diagnostics':
+            snap=diagnostics.snapshot(c,((q.get('ping') or ['0'])[0]=='1'));snap['usage_tracker']=usage_tracker.diagnostics();return self.json(snap)
         if p=='/api/update/status':return self.json(update_status(c,False))
         if p=='/api/report':
             us=quota_view(c,db.users());return self.json({'users':us,'devices':db.devices(),'gateway':db.gateway_usage(),'events':db.events(100),'health':{'ok':True,'version':'3.1.0'}})
@@ -186,13 +182,15 @@ class Handler(SimpleHTTPRequestHandler):
             if p=='/api/policy/apply':apply(c);return self.json({'ok':True})
             if p=='/api/reset-month':db.reset_month();return self.json({'ok':True})
             if p=='/api/settings':
-                for sec in ('bundle','network','guest','features','security'):
+                for sec in ('bundle','network','guest','features','security','usage'):
                     if sec in d and isinstance(d[sec],dict):c[sec].update(d[sec])
                 if 'bundle' in d:
                     mode=str(c['bundle'].get('bundle_type','renew_day'))
                     if mode not in ('renew_day','end_of_month'):raise ValueError('invalid bundle_type')
                     rd=int(c['bundle'].get('reset_day',1))
                     if mode=='renew_day' and not 1<=rd<=28:raise ValueError('reset_day must be 1..28')
+                if 'usage' in d:
+                    c['usage']['enabled']=bool(c['usage'].get('enabled',True));c['usage']['poll_seconds']=max(1,min(float(c['usage'].get('poll_seconds',2)),60));c['usage']['speed_smoothing_alpha']=max(.05,min(float(c['usage'].get('speed_smoothing_alpha',.4)),1))
                 config.save(c);apply(c);return self.json({'ok':True})
             if p=='/api/dns/settings':
                 x=d if isinstance(d,dict) else {}
@@ -249,17 +247,17 @@ class Handler(SimpleHTTPRequestHandler):
         return self.json({'error':'not found'},404)
 
 def main():
-    global DNS,PREV_GATEWAY
+    global DNS
     if os.geteuid()!=0:raise SystemExit('QuotaGate must run as root')
     db.init();c=config.load()
     try:network.runtime(c);network.start_network_daemons(c)
     except Exception as e:db.event('network startup: '+str(e),'error')
-    try:apply(c);PREV_GATEWAY=network.gateway_counters()
+    try:apply(c)
     except Exception as e:db.event('policy startup: '+str(e),'error')
     if c.get('features',{}).get('dns_proxy',True):
         try:DNS=DNSProxy(c);DNS.start();db.event('DNS proxy listening on '+c['network']['lan_ip']+':53')
         except Exception as e:db.event('DNS proxy: '+str(e),'error')
-    threading.Thread(target=worker,daemon=True).start();host,port=c['web']['host'],int(c['web']['port']);srv=ThreadingHTTPServer((host,port),Handler)
+    usage_tracker.start();threading.Thread(target=worker,daemon=True).start();host,port=c['web']['host'],int(c['web']['port']);srv=ThreadingHTTPServer((host,port),Handler)
     if c['web'].get('https'):
         ctx=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);ctx.load_cert_chain(c['web']['cert'],c['web']['key']);srv.socket=ctx.wrap_socket(srv.socket,server_side=True)
     db.event(f'QuotaGate 3.1 started on {host}:{port} as uid 0');srv.serve_forever()

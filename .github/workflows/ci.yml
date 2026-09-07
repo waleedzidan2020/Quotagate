@@ -12,7 +12,7 @@ jobs:
       - name: Python compile
         run: python3 -m compileall -q app
       - name: Python import smoke test
-        run: python3 -c "import app; import app.shaping; import app.diagnostics; import app.guestmode; import app.shaping_policy; import app.dnsproxy"
+        run: python3 -c "import app; import app.shaping; import app.diagnostics; import app.guestmode; import app.shaping_policy; import app.dnsproxy; import app.usage_tracker"
       - name: Guest speed policy semantics
         run: |
           python3 - <<'PY'
@@ -63,6 +63,26 @@ jobs:
           assert dnsproxy.error_reply(b'\x12\x34'+b'\x00'*10,2)[:2]==b'\x12\x34'
           print('dns fallback safety: OK')
           PY
+      - name: Live usage accounting semantics
+        run: |
+          python3 - <<'PY'
+          import time
+          from app import db, usage_tracker
+          # Normal delta.
+          assert usage_tracker._counter_delta(1000,1500)==500
+          # Counter reset/rebuild: new absolute value is baseline only.
+          assert usage_tracker._counter_delta(5000,100)==0
+          # Service startup: first existing kernel value is not counted.
+          assert usage_tracker._counter_delta(None,10*1024*1024)==0
+          # No traffic means no delta / no DB write required.
+          assert usage_tracker._counter_delta(1000,1000)==0
+          # Speed uses actual elapsed time, not an assumed poll interval.
+          assert abs(usage_tracker._speed_mbps(1_000_000,2)-4.0)<1e-9
+          # Local-midnight bucket rollover uses local system time.
+          a=time.mktime((2026,9,7,23,59,59,0,0,-1));b=time.mktime((2026,9,8,0,0,1,0,0,-1))
+          assert db.day(a)=='2026-09-07';assert db.day(b)=='2026-09-08'
+          print('live usage accounting: OK')
+          PY
       - name: JavaScript syntax
         run: |
           node --check web/app.js
@@ -70,6 +90,7 @@ jobs:
           node --check web/speed-toggle.js
           node --check web/guest-mode.js
           node --check web/guest-shaping.js
+          node --check web/live-usage.js
       - name: Shell syntax
         run: |
           bash -n install.sh
