@@ -1,7 +1,7 @@
 from __future__ import annotations
 import os, sqlite3, time
 from pathlib import Path
-from . import db, config, usage_tracker, quota
+from . import db, config, usage_tracker, quota, network, shaping_policy
 
 TABLE_META={
  'users':('accounts','danger','Users, quota configuration and per-user policy.','danger'),
@@ -37,38 +37,34 @@ def _valid_table(name,cx=None):
     if n not in _tables(cx):raise ValueError('invalid table')
     return n
 
-def _qident(name):
-    return '"'+str(name).replace('"','""')+'"'
-
+def _qident(name):return '"'+str(name).replace('"','""')+'"'
 def _schema(cx,name):
-    name=_valid_table(name,cx)
-    return [dict(r) for r in cx.execute(f'PRAGMA table_info({_qident(name)})')]
-
+    name=_valid_table(name,cx);return [dict(r) for r in cx.execute(f'PRAGMA table_info({_qident(name)})')]
 def _meta(name):
-    cat,risk,desc,policy=TABLE_META.get(name,('internal','caution','Unknown/internal application table.','view'))
-    return {'category':cat,'risk':risk,'description':desc,'policy':policy}
+    cat,risk,desc,policy=TABLE_META.get(name,('internal','caution','Unknown/internal application table.','view'));return {'category':cat,'risk':risk,'description':desc,'policy':policy}
 
 def overview():
     with db.con() as cx:
         names=_tables(cx);items=[];total=0
         for name in names:
-            count=int(cx.execute(f'SELECT COUNT(*) n FROM {_qident(name)}').fetchone()['n']);total+=count
-            items.append({'name':name,'records':count,**_meta(name)})
-        journal=str(cx.execute('PRAGMA journal_mode').fetchone()[0]);
-        row=cx.execute("SELECT value FROM settings WHERE key='schema_version'").fetchone() if 'settings' in names else None
-    return {'database_file':db.DB.name,'database_size_bytes':db.DB.stat().st_size if db.DB.exists() else 0,'journal_mode':journal,'schema_version':row['value'] if row else '', 'table_count':len(items),'total_records':total,'tables':items}
+            count=int(cx.execute(f'SELECT COUNT(*) n FROM {_qident(name)}').fetchone()['n']);total+=count;items.append({'name':name,'records':count,**_meta(name)})
+        journal=str(cx.execute('PRAGMA journal_mode').fetchone()[0]);row=cx.execute("SELECT value FROM settings WHERE key='schema_version'").fetchone() if 'settings' in names else None
+    return {'database_file':db.DB.name,'database_size_bytes':db.DB.stat().st_size if db.DB.exists() else 0,'journal_mode':journal,'schema_version':row['value'] if row else '','table_count':len(items),'total_records':total,'tables':items}
 
 def table_rows(name,limit=50,offset=0):
     limit=max(1,min(int(limit),100));offset=max(0,int(offset))
     with db.con() as cx:
-        name=_valid_table(name,cx);cols=_schema(cx,name);safe_cols=[c['name'] for c in cols if c['name'].lower() not in SENSITIVE and not any(x in c['name'].lower() for x in ('password','secret','private_key','api_key'))]
-        select=','.join(_qident(x) for x in safe_cols) or 'rowid'
-        total=int(cx.execute(f'SELECT COUNT(*) n FROM {_qident(name)}').fetchone()['n'])
-        rows=[dict(r) for r in cx.execute(f'SELECT {select} FROM {_qident(name)} LIMIT ? OFFSET ?',(limit,offset))]
+        name=_valid_table(name,cx);cols=_schema(cx,name);safe_cols=[c['name'] for c in cols if c['name'].lower() not in SENSITIVE and not any(x in c['name'].lower() for x in ('password','secret','private_key','api_key'))];select=','.join(_qident(x) for x in safe_cols) or 'rowid';total=int(cx.execute(f'SELECT COUNT(*) n FROM {_qident(name)}').fetchone()['n']);rows=[dict(r) for r in cx.execute(f'SELECT {select} FROM {_qident(name)} LIMIT ? OFFSET ?',(limit,offset))]
     return {'table':name,'columns':[c for c in cols if c['name'] in safe_cols],'rows':rows,'total':total,'limit':limit,'offset':offset,**_meta(name)}
 
-def _pk_columns(cols):
-    return [x['name'] for x in sorted((c for c in cols if int(c.get('pk') or 0)>0),key=lambda c:int(c['pk']))]
+def _pk_columns(cols):return [x['name'] for x in sorted((c for c in cols if int(c.get('pk') or 0)>0),key=lambda c:int(c['pk']))]
+def _refresh_kind(name):
+    if name in ('events','alerts','dns_history'):return 'none'
+    if name in ('usage_daily','usage_monthly','gateway_usage_daily','gateway_usage_monthly'):return 'usage'
+    if name in ('user_usage_cycle','user_quota_state'):return 'quota'
+    if name=='dns_rules':return 'dns'
+    if name in ('mac_rules','firewall_rules','port_forwards','users','devices'):return 'policy'
+    return 'none'
 
 def delete_records(name,keys):
     if name=='settings':raise ValueError('settings is view-only')
@@ -80,45 +76,39 @@ def delete_records(name,keys):
         deleted=0
         for item in keys:
             if not isinstance(item,dict) or any(k not in item for k in pk):raise ValueError('invalid primary key')
-            where=' AND '.join(f'{_qident(k)}=?' for k in pk);vals=[item[k] for k in pk]
-            cur=cx.execute(f'DELETE FROM {_qident(name)} WHERE {where}',vals);deleted+=max(0,int(cur.rowcount or 0))
-    db.event(f'Maintenance: deleted {deleted} record(s) from {name}','warning')
-    return {'ok':True,'deleted':deleted,'refresh':_refresh_kind(name)}
-
-def _refresh_kind(name):
-    if name in ('events','alerts','dns_history'):return 'none'
-    if name in ('usage_daily','usage_monthly','gateway_usage_daily','gateway_usage_monthly'):return 'usage'
-    if name in ('user_usage_cycle','user_quota_state'):return 'quota'
-    if name=='dns_rules':return 'dns'
-    if name in ('mac_rules','firewall_rules','port_forwards','users','devices'):return 'policy'
-    return 'none'
+            where=' AND '.join(f'{_qident(k)}=?' for k in pk);cur=cx.execute(f'DELETE FROM {_qident(name)} WHERE {where}',[item[k] for k in pk]);deleted+=max(0,int(cur.rowcount or 0))
+    db.event(f'Maintenance: deleted {deleted} record(s) from {name}','warning');return {'ok':True,'deleted':deleted,'refresh':_refresh_kind(name)}
 
 def clear_table(name):
-    meta=_meta(name);policy=meta['policy']
+    policy=_meta(name)['policy']
     if name not in TABLE_META:raise ValueError('unknown table is view-only')
     if policy in ('view','smart','danger'):raise ValueError('use a specific maintenance action for this table')
     with db.L,db.con() as cx:
         name=_valid_table(name,cx);before=int(cx.execute(f'SELECT COUNT(*) n FROM {_qident(name)}').fetchone()['n']);cx.execute(f'DELETE FROM {_qident(name)}')
-    db.event(f'Maintenance: cleared {before} record(s) from {name}','warning')
-    return {'ok':True,'deleted':before,'refresh':_refresh_kind(name)}
+    db.event(f'Maintenance: cleared {before} record(s) from {name}','warning');return {'ok':True,'deleted':before,'refresh':_refresh_kind(name)}
+
+def reset_live_baseline():
+    tracker=usage_tracker.TRACKER;devices=shaping_policy._sanitize_devices(db.devices());owners={int(d['id']) for d in devices};raw=network.counters();cur={k:int(v) for k,v in raw.items() if int(k[0]) in owners}
+    with tracker._lock:
+        tracker._prev=cur;tracker._live={did:{'up':0.0,'down':0.0} for did in owners};tracker._gateway_live={'up':0.0,'down':0.0};tracker._last_sample_mono=time.monotonic();tracker._last_poll_mono=tracker._last_sample_mono
+    return len(owners)
 
 def reset(action,user_id=None):
-    action=str(action or '')
-    c=config.load();today=db.day();month=db.period();deleted=0;refresh='usage'
+    action=str(action or '');c=config.load();today=db.day();month=db.period();deleted=0;refresh='usage'
     if action=='live_baseline':
-        usage_tracker.reset_baseline();db.event('Maintenance: reset live usage baseline','warning');return {'ok':True,'deleted':0,'refresh':'none'}
+        n=reset_live_baseline();db.event(f'Maintenance: reset live usage baseline for {n} device(s)','warning');return {'ok':True,'deleted':0,'refresh':'none'}
     if action=='today_device':
         with db.L,db.con() as cx:cur=cx.execute('DELETE FROM usage_daily WHERE day=?',(today,));deleted=max(0,int(cur.rowcount or 0))
-        usage_tracker.reset_baseline()
+        reset_live_baseline()
     elif action=='today_gateway':
         with db.L,db.con() as cx:cur=cx.execute('DELETE FROM gateway_usage_daily WHERE day=?',(today,));deleted=max(0,int(cur.rowcount or 0))
-        usage_tracker.reset_baseline()
+        reset_live_baseline()
     elif action=='month_device':
         with db.L,db.con() as cx:cur=cx.execute('DELETE FROM usage_monthly WHERE period=?',(month,));deleted=max(0,int(cur.rowcount or 0))
-        usage_tracker.reset_baseline()
+        reset_live_baseline()
     elif action=='month_gateway':
         with db.L,db.con() as cx:cur=cx.execute('DELETE FROM gateway_usage_monthly WHERE period=?',(month,));deleted=max(0,int(cur.rowcount or 0))
-        usage_tracker.reset_baseline()
+        reset_live_baseline()
     elif action=='user_quota':
         if user_id is None:raise ValueError('user_id required')
         quota.reset_user(int(user_id));refresh='quota'
@@ -131,12 +121,10 @@ def reset(action,user_id=None):
         quota.reconcile_all(c,refresh=True);refresh='quota'
     elif action=='current_quota_cycle':
         key=quota.cycle_key(c)
-        with db.L,db.con() as cx:
-            cur=cx.execute('DELETE FROM user_usage_cycle WHERE cycle_key=?',(key,));deleted=max(0,int(cur.rowcount or 0));cx.execute('DELETE FROM user_quota_state WHERE cycle_key=?',(key,))
+        with db.L,db.con() as cx:cur=cx.execute('DELETE FROM user_usage_cycle WHERE cycle_key=?',(key,));deleted=max(0,int(cur.rowcount or 0));cx.execute('DELETE FROM user_quota_state WHERE cycle_key=?',(key,))
         quota.reconcile_all(c,refresh=True);refresh='quota'
     else:raise ValueError('unknown reset action')
-    db.event(f'Maintenance: {action} affected {deleted} record(s)','warning')
-    return {'ok':True,'deleted':deleted,'refresh':refresh}
+    db.event(f'Maintenance: {action} affected {deleted} record(s)','warning');return {'ok':True,'deleted':deleted,'refresh':refresh}
 
 def vacuum():
     before=db.DB.stat().st_size if db.DB.exists() else 0
@@ -144,15 +132,12 @@ def vacuum():
         try:cx.execute('PRAGMA wal_checkpoint(TRUNCATE)')
         except Exception:pass
         cx.execute('VACUUM')
-    after=db.DB.stat().st_size if db.DB.exists() else 0;db.event('Maintenance: VACUUM completed','info')
-    return {'ok':True,'before_bytes':before,'after_bytes':after}
+    after=db.DB.stat().st_size if db.DB.exists() else 0;db.event('Maintenance: VACUUM completed','info');return {'ok':True,'before_bytes':before,'after_bytes':after}
 
 def backup():
-    BACKUP_DIR.mkdir(parents=True,exist_ok=True,mode=0o700);os.chmod(BACKUP_DIR,0o700)
-    stamp=time.strftime('%Y%m%d-%H%M%S');target=BACKUP_DIR/f'quotagate-{stamp}.db'
+    BACKUP_DIR.mkdir(parents=True,exist_ok=True,mode=0o700);os.chmod(BACKUP_DIR,0o700);stamp=time.strftime('%Y%m%d-%H%M%S');target=BACKUP_DIR/f'quotagate-{stamp}.db'
     with db.L:
         src=sqlite3.connect(str(db.DB));dst=sqlite3.connect(str(target))
         try:src.backup(dst)
         finally:dst.close();src.close()
-    os.chmod(target,0o600);db.event(f'Maintenance: database backup created {target.name}','info')
-    return {'ok':True,'name':target.name,'size_bytes':target.stat().st_size}
+    os.chmod(target,0o600);db.event(f'Maintenance: database backup created {target.name}','info');return {'ok':True,'name':target.name,'size_bytes':target.stat().st_size}
