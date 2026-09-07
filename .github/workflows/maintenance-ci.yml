@@ -1,0 +1,93 @@
+name: QuotaGate maintenance checks
+
+on:
+  pull_request:
+  push:
+    branches:
+      - feat/maintenance-center
+
+jobs:
+  maintenance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Python syntax
+        run: python -m py_compile app/*.py
+      - name: JavaScript syntax
+        run: node --check web/maintenance.js && node --check web/app.js
+      - name: Maintenance database regression checks
+        run: |
+          python - <<'PY'
+          import tempfile
+          from pathlib import Path
+          from app import db, quota, maintenance, usage_tracker
+
+          tmp=Path(tempfile.mkdtemp())
+          db.DB=tmp/'quotagate.db'
+          maintenance.BACKUP_DIR=tmp/'backups'
+          with db.con() as c:
+              c.executescript(db.SCHEMA)
+              c.executescript(quota._SCHEMA)
+              c.execute("INSERT INTO settings(key,value) VALUES('schema_version','4')")
+              c.execute("INSERT INTO events(ts,level,message) VALUES(1,'info','one')")
+              c.execute("INSERT INTO alerts(ts,kind,message,seen) VALUES(1,'test','alert',1)")
+              c.execute("INSERT INTO dns_rules(scope_type,scope_id,domain,action,target,enabled) VALUES('global',0,'example.com','block','',1)")
+              c.execute("INSERT INTO dns_history(ts,device_id,client_ip,domain,qtype,action) VALUES(1,NULL,'192.168.2.2','example.com','A','allow')")
+              c.execute("INSERT INTO usage_daily(device_id,day,up_bytes,down_bytes) VALUES(7,'2026-09-01',10,20)")
+              c.execute("INSERT INTO usage_daily(device_id,day,up_bytes,down_bytes) VALUES(7,'2026-09-02',30,40)")
+
+          o=maintenance.overview()
+          names={x['name'] for x in o['tables']}
+          assert 'events' in names and 'user_quota_state' in names
+          assert next(x for x in o['tables'] if x['name']=='events')['records']==1
+
+          page=maintenance.table_rows('usage_daily',1,0)
+          assert page['total']==2 and len(page['rows'])==1
+
+          try:
+              maintenance.table_rows('events; DROP TABLE users;')
+              raise AssertionError('SQL injection table name accepted')
+          except ValueError:
+              pass
+
+          try:
+              maintenance.clear_table('settings')
+              raise AssertionError('settings clear accepted')
+          except ValueError:
+              pass
+
+          r=maintenance.clear_table('events')
+          assert r['deleted']==1
+          with db.con() as c:
+              assert c.execute('SELECT COUNT(*) FROM alerts').fetchone()[0]==1
+              assert c.execute('SELECT COUNT(*) FROM dns_history').fetchone()[0]==1
+              assert c.execute('SELECT COUNT(*) FROM dns_rules').fetchone()[0]==1
+
+          r=maintenance.delete_records('usage_daily',[{'device_id':7,'day':'2026-09-01'}])
+          assert r['deleted']==1
+          with db.con() as c:
+              assert c.execute('SELECT COUNT(*) FROM usage_daily').fetchone()[0]==1
+              assert c.execute("SELECT day FROM usage_daily").fetchone()[0]=='2026-09-02'
+
+          info=maintenance.backup()
+          assert (maintenance.BACKUP_DIR/info['name']).exists()
+
+          # Live reset must adopt current nft counters as baseline, not recount them.
+          old_devices=usage_tracker.shaping_policy._sanitize_devices
+          old_counters=usage_tracker.network.counters
+          usage_tracker.shaping_policy._sanitize_devices=lambda rows:[{'id':99}]
+          usage_tracker.network.counters=lambda:{(99,'up'):1234,(99,'down'):5678}
+          try:
+              got=usage_tracker.reset_baseline()
+              assert got['tracked_devices']==1
+              assert usage_tracker.TRACKER._prev[(99,'up')]==1234
+              assert usage_tracker.TRACKER._live[99]['up']==0.0
+          finally:
+              usage_tracker.shaping_policy._sanitize_devices=old_devices
+              usage_tracker.network.counters=old_counters
+
+          print('maintenance regression checks passed')
+          PY
