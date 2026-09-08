@@ -1,6 +1,7 @@
 from __future__ import annotations
-import ipaddress
-from . import db, shaping, gaming
+import ipaddress, re
+from pathlib import Path
+from . import db, shaping, gaming, shaping_policy
 
 _ALLOWED = {'high', 'normal', 'low'}
 _PRIO = {'high': 0, 'normal': 1, 'low': 2}
@@ -34,6 +35,52 @@ def priority_status(devices):
     return {'devices': out, 'gaming': gs}
 
 
+def _owned_device_classids():
+    """All stable device class IDs QuotaGate may have created previously.
+
+    This intentionally includes stale/duplicate DB rows so an old pre-priority
+    class cannot survive as a root sibling and silently bypass the new parent.
+    """
+    out = set()
+    for d in db.devices():
+        try:
+            out.add(shaping._device_classid(int(d['id'])))
+        except Exception:
+            pass
+    return sorted(out)
+
+
+def _remove_old_device_classes(iface):
+    # tc `class replace` does not reliably re-parent an existing HTB class.
+    # Remove QuotaGate's stable device classes after the fwmark filter is detached,
+    # then recreate them under 1:1. During this short window traffic goes through
+    # the existing fail-open/default pass-through class instead of being dropped.
+    for cid in _owned_device_classids():
+        shaping._run(['tc', 'qdisc', 'del', 'dev', iface, 'parent', cid])
+        shaping._run(['tc', 'class', 'del', 'dev', iface, 'classid', cid])
+
+
+def _verify_priority_tree(iface, applied):
+    """Verify the structural properties that make HTB priority actually work.
+
+    A device class that remains a root sibling cannot borrow from 1:1, which was
+    the real-world antiX failure that reduced throughput after enabling priority.
+    """
+    p = shaping._run(['tc', 'class', 'show', 'dev', iface])
+    if p.returncode:
+        return False
+    lines = p.stdout.splitlines()
+    if not any(re.search(r'\bclass\s+htb\s+1:1\b', line) for line in lines):
+        return False
+    for x in applied:
+        cid = re.escape(str(x['classid']))
+        prio = int(_PRIO[normalize(x.get('priority') or 'normal')])
+        line = next((line for line in lines if re.search(rf'\bclass\s+htb\s+{cid}\b', line)), '')
+        if not line or 'parent 1:1' not in line or not re.search(rf'\bprio\s+{prio}\b', line):
+            return False
+    return True
+
+
 def install():
     global _INSTALLED
     if _INSTALLED:
@@ -42,8 +89,6 @@ def install():
 
     old_init = db.init
     old_update_device = db.update_device
-    old_limits = shaping._limits
-    old_shape_iface = shaping._shape_iface
     old_signature = shaping._signature
 
     def init():
@@ -76,6 +121,10 @@ def install():
                     c.execute("UPDATE devices SET priority='low' WHERE id=?", (int(i),))
 
     def limits(c, devices, users):
+        # Preserve the duplicate-IP / invalid-MAC safety layer installed by
+        # shaping_policy. The first priority implementation accidentally bypassed
+        # it, allowing two DB rows with one IP to emit competing nft fwmarks.
+        devices = shaping_policy._sanitize_devices(devices)
         um = {u['id']: u for u in users}
         rows = []
         game_active = bool(gaming.current())
@@ -96,8 +145,8 @@ def install():
             rows.append((d, ip, dr, ur, dp, up))
 
         # Do not alter legacy behavior until priority is actually used. Once any
-        # device is High/Low (or Gaming Mode is active), classify all known devices
-        # so Normal traffic cannot bypass the same line-rate scheduler.
+        # device is High/Low (or Gaming Mode is active), classify every live unique
+        # IP so Normal traffic participates in the same line-rate scheduler.
         priority_active = game_active or any(dp != 'normal' or up != 'normal' for _, _, _, _, dp, up in rows)
         down_total = shaping._line_rate(c, 'down') if priority_active and rows else 0
         up_total = shaping._line_rate(c, 'up') if priority_active and rows else 0
@@ -117,7 +166,6 @@ def install():
 
     def shape_iface(iface, direction, items, c):
         iface = shaping._iface(iface)
-        from pathlib import Path
         if not Path('/sys/class/net').joinpath(iface).exists():
             raise RuntimeError(f'tc interface {iface} does not exist')
         prepared, total = shaping._prepared_items(c, direction, items)
@@ -128,32 +176,44 @@ def install():
         total = int(total or 0)
         pass_rate = max(shaping._PASS_THROUGH_KBIT, total)
         shaping._ensure_root(iface, pass_rate)
-        # 1:1 is the shared Internet line. Device children borrow unused bandwidth
-        # up to their own ceil; HTB prio decides who borrows first under congestion.
-        shaping._run(['tc', 'class', 'replace', 'dev', iface, 'parent', '1:', 'classid', '1:1', 'htb',
-                      'rate', f'{total}kbit', 'ceil', f'{total}kbit'], check=True)
-        shaping._run(['tc', 'filter', 'del', 'dev', iface, 'parent', '1:', 'protocol', 'ip', 'prio', '10'])
 
-        # Small guarantees keep the sum safely below the parent while leaving most
-        # capacity borrowable according to High/Normal/Low priority.
-        guarantee = max(1, total // max(100, len(prepared) * 20))
+        # Detach QuotaGate marks first, then rebuild only QuotaGate device classes.
+        # This fixes legacy classes that `tc class replace` left as `root` siblings.
+        shaping._run(['tc', 'filter', 'del', 'dev', iface, 'parent', '1:', 'protocol', 'ip', 'prio', '10'])
+        _remove_old_device_classes(iface)
+
+        # 1:1 is the shared Internet line. A larger explicit burst avoids the tiny
+        # 1600-byte HTB default becoming a timer-rate bottleneck on older i686
+        # kernels while keeping the configured average line rate unchanged.
+        shaping._run(['tc', 'class', 'replace', 'dev', iface, 'parent', '1:', 'classid', '1:1', 'htb',
+                      'rate', f'{total}kbit', 'ceil', f'{total}kbit', 'burst', '32kb', 'cburst', '32kb'], check=True)
+
+        # Give every participating device a fair-share guaranteed rate. Priority
+        # controls borrowing under congestion; it must not turn an idle High device
+        # into a 10/100 kbit class. Unused capacity remains borrowable up to ceil.
+        fair_share = max(1, total // max(1, len(prepared)))
         applied = []
         for x in prepared:
             cid = x['classid']
             ceiling = int(x['rate'])
-            rate = max(1, min(ceiling, guarantee))
+            rate = max(1, min(ceiling, fair_share))
             p = normalize(x.get('priority') or 'normal')
-            shaping._run(['tc', 'class', 'replace', 'dev', iface, 'parent', '1:1', 'classid', cid, 'htb',
-                          'rate', f'{rate}kbit', 'ceil', f'{ceiling}kbit', 'prio', str(_PRIO[p])], check=True)
-            shaping._run(['tc', 'qdisc', 'replace', 'dev', iface, 'parent', cid, 'fq_codel'], check=True)
+            shaping._run(['tc', 'class', 'add', 'dev', iface, 'parent', '1:1', 'classid', cid, 'htb',
+                          'rate', f'{rate}kbit', 'ceil', f'{ceiling}kbit', 'prio', str(_PRIO[p]),
+                          'burst', '16kb', 'cburst', '16kb'], check=True)
+            shaping._run(['tc', 'qdisc', 'add', 'dev', iface, 'parent', cid, 'fq_codel'], check=True)
             shaping._run(['tc', 'filter', 'add', 'dev', iface, 'parent', '1:', 'protocol', 'ip',
                           'prio', '10', 'handle', hex(x['mark']), 'fw', 'flowid', cid], check=True)
             applied.append({**x, 'applied_rate': ceiling, 'priority': p})
+
+        if not _verify_priority_tree(iface, applied):
+            raise RuntimeError('priority HTB verification failed: device class not attached to parent 1:1 with expected prio')
         return applied
 
     def signature(c, devices, users):
         base = old_signature(c, devices, users)
-        priorities = tuple((int(d['id']), effective_priority(d)) for d in sorted(devices, key=lambda x: int(x['id'])))
+        safe = shaping_policy._sanitize_devices(devices)
+        priorities = tuple((int(d['id']), effective_priority(d)) for d in sorted(safe, key=lambda x: int(x['id'])))
         return base + (priorities, gaming.signature())
 
     db.init = init
