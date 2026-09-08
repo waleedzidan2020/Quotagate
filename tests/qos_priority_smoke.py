@@ -3,7 +3,7 @@ from pathlib import Path
 import sys, tempfile, time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from app import db, gaming, qos_priority
+from app import db, gaming, qos_priority, shaping
 
 
 def cfg():
@@ -38,6 +38,14 @@ def main():
         except ValueError:
             pass
 
+        # Regression: priority must keep the duplicate-IP sanitizer installed by
+        # shaping_policy. Two rows sharing one IP must never emit two nft marks.
+        cdup, _ = db.upsert_device('02:00:00:00:00:03', '192.168.2.102', 'Stale duplicate')
+        db.update_device(cdup, priority='low')
+        down, up = shaping._limits(cfg(), db.devices(), db.users())
+        assert len({x['ip'] for x in down}) == len(down)
+        assert len({x['ip'] for x in up}) == len(up)
+
         s = gaming.start(cfg(), a, 30, 'low', True, 3000, 700, 1000)
         assert s['active'] and s['device_id'] == a
         devices = db.devices(); ga = next(d for d in devices if d['id'] == a); gb = next(d for d in devices if d['id'] == b)
@@ -59,6 +67,12 @@ def main():
         assert "'high': 0" in source and "'normal': 1" in source and "'low': 2" in source
         assert "'parent', '1:1'" in source
         assert "'fq_codel'" in source
+        assert '_remove_old_device_classes' in source
+        assert "'class', 'add'" in source
+        assert 'fair_share' in source
+        assert "'burst', '32kb'" in source
+        assert 'shaping_policy._sanitize_devices' in source
+        assert 'priority HTB verification failed' in source
         main_source = Path('app/main.py').read_text()
         assert 'restart_wifi_after_save' in main_source
         qos_routes = main_source[main_source.find("if p=='/api/device/priority'"):main_source.find("if p=='/api/device/update'")]
