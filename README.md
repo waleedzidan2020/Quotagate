@@ -1,6 +1,6 @@
 # QuotaGate
 
-QuotaGate هو Gateway / Quota Manager خفيف مخصص لـ antiX Linux لإدارة الأجهزة المتصلة، السرعات، الحصص، Guest Mode، DNS، Firewall، QoS Priority وGaming Mode من Dashboard ويب محلية.
+QuotaGate is a lightweight Gateway / Quota Manager designed for antiX Linux to manage connected devices, bandwidth limits, quotas, Guest Mode, DNS, Firewall, QoS Priority, and Gaming Mode through a local web dashboard.
 
 > **التوبولوجي الافتراضي للمشروع:**
 >
