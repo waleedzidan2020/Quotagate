@@ -4,7 +4,7 @@ from http.cookies import SimpleCookie
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
-from . import auth, config, db, network, diagnostics, usage_tracker, maintenance
+from . import auth, config, db, network, diagnostics, usage_tracker, maintenance, gaming, qos_priority
 from .dnsproxy import DNSProxy
 
 ROOT=Path(__file__).resolve().parent.parent; WEB=ROOT/'web'; LOCK=threading.RLock(); SESSIONS={}; FAILS={}; BANS={}; REQS={}; DNS=None
@@ -91,7 +91,7 @@ def worker():
     global DNS
     while True:
         try:
-            c=config.load();maybe_reset(c);scan(c);apply(c)
+            c=config.load();maybe_reset(c);gaming.tick(c);scan(c);apply(c)
             dcfg=c.get('dns',{});db.prune_dns(dcfg.get('history_days',7),dcfg.get('max_history_rows',100000))
             if DNS:DNS.update_config(c)
             u=c.get('updates',{})
@@ -141,6 +141,8 @@ class Handler(SimpleHTTPRequestHandler):
         if p=='/api/status':
             us=quota_view(c,db.users());ds=db.devices();gu=db.gateway_usage();gateway_bytes=int(gu.get('up_bytes',0))+int(gu.get('down_bytes',0));used=gateway_bytes
             return self.json({'users':us,'devices':ds,'events':db.events(80),'alerts':db.alerts(50),'daily':usage_tracker.daily_history(),'bundle':{**c['bundle'],'used_bytes':used,'gateway_bytes':gateway_bytes},'network':c['network'],'wifi':wifi_view(c),'web':c['web'],'mac_rules':db.mac_rules(),'system':system_info(c),'dns':c.get('dns',{}),'updates':{k:v for k,v in c.get('updates',{}).items() if k!='repo'}})
+        if p=='/api/network/priority-status':return self.json(qos_priority.priority_status(db.devices()))
+        if p=='/api/gaming/status':return self.json(gaming.status(db.devices()))
         if p=='/api/settings':return self.json(mask_config(c))
         if p=='/api/usage/live':return self.json(usage_tracker.snapshot())
         if p in ('/api/maintenance/overview','/api/maintenance/tables'):return self.json(maintenance.overview())
@@ -190,6 +192,19 @@ class Handler(SimpleHTTPRequestHandler):
             if p=='/api/user/update':x=dict(d);i=int(x.pop('id'));db.update_user(i,**x);apply(c);return self.json({'ok':True})
             if p=='/api/user/topup':us={u['id']:u for u in db.users()};i=int(d['id']);u=us[i];db.update_user(i,topup_gb=float(u.get('topup_gb') or 0)+float(d.get('gb',0)));return self.json({'ok':True})
             if p=='/api/user/delete':db.delete_user(int(d['id']));apply(c);return self.json({'ok':True})
+            if p=='/api/device/priority':
+                i=int(d.get('id'));priority=qos_priority.normalize(d.get('priority'));row=next((x for x in db.devices() if int(x['id'])==i),None)
+                if not row:raise ValueError('device not found')
+                db.update_device(i,priority=priority);apply(c);return self.json({'ok':True,'id':i,'priority':priority})
+            if p=='/api/gaming/start':
+                try:
+                    r=gaming.start(c,int(d.get('device_id')),int(d.get('duration_minutes',30)),d.get('other_priority','low'),bool(d.get('limit_others',False)),int(d.get('other_down_kbit',0) or 0),int(d.get('other_up_kbit',0) or 0),int(d.get('guest_down_kbit',0) or 0));apply(c);return self.json(r)
+                except Exception:
+                    gaming.stop('apply-failed')
+                    try:apply(c)
+                    except Exception:pass
+                    raise
+            if p=='/api/gaming/stop':gaming.stop('manual');apply(c);return self.json({'active':False,'restored':True})
             if p=='/api/device/update':x=dict(d);i=int(x.pop('id'));db.update_device(i,**x);apply(c);return self.json({'ok':True})
             if p=='/api/device/delete':
                 ds={x['id']:x for x in db.devices()};i=int(d['id']);old=ds.get(i)
@@ -267,7 +282,7 @@ class Handler(SimpleHTTPRequestHandler):
 def main():
     global DNS
     if os.geteuid()!=0:raise SystemExit('QuotaGate must run as root')
-    db.init();c=config.load()
+    db.init();c=config.load();gaming.tick(c)
     try:network.runtime(c);network.start_network_daemons(c)
     except Exception as e:db.event('network startup: '+str(e),'error')
     try:apply(c)
