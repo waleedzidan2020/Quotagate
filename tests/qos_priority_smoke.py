@@ -42,7 +42,7 @@ def main():
         # shaping_policy. Two rows sharing one IP must never emit two nft marks.
         cdup, _ = db.upsert_device('02:00:00:00:00:03', '192.168.2.102', 'Stale duplicate')
         db.update_device(cdup, priority='low')
-        down, up = shaping._limits(cfg(), db.devices(), db.users())
+        down, up = shaping._limits(cfg(), db.devices(), [])
         assert len({x['ip'] for x in down}) == len(down)
         assert len({x['ip'] for x in up}) == len(up)
 
