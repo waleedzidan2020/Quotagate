@@ -41,3 +41,9 @@ _shaping_policy.install()
 # and append lightweight per-user quota fields to /api/usage/live.
 from . import quota_integration as _quota_integration
 _quota_integration.install()
+
+# Device priority and Smart Gaming Mode are a policy layer on top of the same
+# HTB + fq_codel + nftables shaping engine. Install last so the DB/shaping
+# wrappers above keep composing and no parallel QoS engine is introduced.
+from . import qos_priority as _qos_priority
+_qos_priority.install()
