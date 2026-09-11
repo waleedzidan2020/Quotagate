@@ -47,3 +47,9 @@ _quota_integration.install()
 # wrappers above keep composing and no parallel QoS engine is introduced.
 from . import qos_priority as _qos_priority
 _qos_priority.install()
+
+# Static IP reservations are the final device-update/network wrapper so they
+# compose with Guest, quota, shaping and priority logic. Reservations are
+# translated to dnsmasq dhcp-host entries without restarting hostapd/Wi-Fi.
+from . import static_ip as _static_ip
+_static_ip.install()
