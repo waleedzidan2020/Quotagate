@@ -4,7 +4,7 @@ from http.cookies import SimpleCookie
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
-from . import auth, config, db, network, diagnostics, usage_tracker, maintenance, gaming, qos_priority
+from . import auth, config, db, network, diagnostics, usage_tracker, maintenance, gaming, qos_priority, system_power
 from .dnsproxy import DNSProxy
 
 ROOT=Path(__file__).resolve().parent.parent; WEB=ROOT/'web'; LOCK=threading.RLock(); SESSIONS={}; FAILS={}; BANS={}; REQS={}; DNS=None
@@ -107,6 +107,12 @@ def system_info(c):
         except Exception:return ''
     return {'hostname':cmd(['hostname']),'kernel':cmd(['uname','-r']),'uptime':cmd(['uptime','-p']),'interfaces':cmd(['ip','-br','addr']),'version':c.get('version','3.1.0')}
 
+def shutdown_error(exc):
+    try:
+        db.event('Server shutdown execution failed: '+str(exc),'error')
+        db.alert('shutdown-failed','Server shutdown command could not be executed')
+    except Exception:pass
+
 class Handler(SimpleHTTPRequestHandler):
     server_version='QuotaGate-antiX/3.1'
     def log_message(self,*a):pass
@@ -138,6 +144,7 @@ class Handler(SimpleHTTPRequestHandler):
         if p=='/api/health':return self.json({'ok':True,'version':'3.1.0'})
         if not self.need():return
         c=config.load()
+        if p=='/api/admin/shutdown':return self.json({'error':'method not allowed'},405)
         if p=='/api/status':
             us=quota_view(c,db.users());ds=db.devices();gu=db.gateway_usage();gateway_bytes=int(gu.get('up_bytes',0))+int(gu.get('down_bytes',0));used=gateway_bytes
             return self.json({'users':us,'devices':ds,'events':db.events(80),'alerts':db.alerts(50),'daily':usage_tracker.daily_history(),'bundle':{**c['bundle'],'used_bytes':used,'gateway_bytes':gateway_bytes},'network':c['network'],'wifi':wifi_view(c),'web':c['web'],'mac_rules':db.mac_rules(),'system':system_info(c),'dns':c.get('dns',{}),'updates':{k:v for k,v in c.get('updates',{}).items() if k!='repo'}})
@@ -178,6 +185,16 @@ class Handler(SimpleHTTPRequestHandler):
             t=secrets.token_urlsafe(32);SESSIONS[t]=time.time()+28800;return self.json({'ok':True},cookie=f'qg_session={t}; Path=/; HttpOnly; SameSite=Strict')
         if not self.need():return
         try:
+            if p=='/api/admin/shutdown':
+                confirm=str(d.get('confirm',''))
+                try:system_power.validate_shutdown_request(confirm)
+                except ValueError as e:return self.json({'error':str(e)},400)
+                except (PermissionError,RuntimeError) as e:return self.json({'error':str(e)},503)
+                db.event(f'Admin requested server shutdown from web interface ({ip})','warning')
+                try:r=system_power.schedule_shutdown(confirm,on_error=shutdown_error)
+                except Exception as e:
+                    db.event('Server shutdown scheduling failed: '+str(e),'error');return self.json({'error':'shutdown scheduling failed: '+str(e)},500)
+                return self.json(r,202)
             if p=='/api/maintenance/delete-records':
                 r=maintenance.delete_records(str(d.get('table','')),d.get('keys',[]),str(d.get('confirm','')));maintenance_refresh(r.get('refresh'),c);return self.json(r)
             if p=='/api/maintenance/clear-table':
