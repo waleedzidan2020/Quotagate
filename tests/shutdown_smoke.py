@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
-from app import main, system_power
-
 ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from app import main, system_power
 
 
 def check_power_helper() -> None:
@@ -91,7 +94,7 @@ def check_route_security() -> None:
         h.api_get('/api/admin/shutdown', {})
         assert replies[-1][0] == 405
 
-        # Wrong confirmation or unavailable privilege/path is surfaced as an error.
+        # Missing privilege/path is surfaced as an error and never schedules shutdown.
         h, replies = make_handler()
         h.need = lambda: True
         main.system_power.validate_shutdown_request = lambda confirm: (_ for _ in ()).throw(PermissionError('permission denied'))
