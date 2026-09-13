@@ -1,0 +1,23 @@
+name: Shutdown feature checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  shutdown:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python compile
+        run: python3 -m compileall -q app tests/shutdown_smoke.py
+      - name: Shutdown backend and UI smoke checks
+        run: python3 tests/shutdown_smoke.py
+      - name: JavaScript syntax
+        run: |
+          node --check web/app.js
+          node --check web/shutdown.js
+      - name: SysV init syntax
+        run: sh -n init/quotagate
+      - name: Preserve modal hidden rule
+        run: grep -F '.modal[hidden]{display:none!important}' web/styles.css
