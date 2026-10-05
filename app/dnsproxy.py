@@ -10,6 +10,22 @@ PRESETS={
  'gambling':('bet365.com','1xbet.com','betway.com','pokerstars.com'),
  'adult':('pornhub.com','xvideos.com','xnxx.com','redtube.com','youporn.com')
 }
+
+# A single product can use several hostnames/CDNs.  Keep these groups narrow:
+# entering youtube.com blocks the YouTube service without broadly blocking Google.
+SERVICE_GROUPS={
+ 'youtube.com':(
+   'youtube.com',
+   'youtu.be',
+   'youtube-nocookie.com',
+   'googlevideo.com',
+   'ytimg.com',
+   'youtubei.googleapis.com',
+   'youtube.googleapis.com',
+   'yt3.ggpht.com',
+ )
+}
+
 _LOG_LAST={}
 
 
@@ -28,7 +44,9 @@ def parse_query(data):
         ln=data[off]; off+=1
         if ln==0: break
         if off+ln>len(data): return None
-        labels.append(data[off:off+ln].decode('idna','ignore')); off+=ln
+        try:label=data[off:off+ln].decode('ascii')
+        except UnicodeDecodeError:return None
+        labels.append(label); off+=ln
     if off+4>len(data): return None
     qt=struct.unpack('!H',data[off:off+2])[0]
     return '.'.join(labels).lower().rstrip('.'), QTYPE.get(qt,str(qt)), off+4
@@ -59,20 +77,32 @@ def redirect_reply(data,target):
 
 
 def _hit(domain,pattern):
-    p=pattern.lstrip('*.').lower().rstrip('.')
-    return domain==p or domain.endswith('.'+p)
+    p=str(pattern or '').lstrip('*.').lower().rstrip('.')
+    d=str(domain or '').lower().rstrip('.')
+    return bool(p) and (d==p or d.endswith('.'+p))
+
+
+def rule_patterns(pattern):
+    """Expand well-known service roots while keeping ordinary domains exact+subdomains."""
+    p=str(pattern or '').lstrip('*.').lower().rstrip('.')
+    return SERVICE_GROUPS.get(p,(p,))
+
+
+def rule_matches(domain,pattern):
+    return any(_hit(domain,p) for p in rule_patterns(pattern))
 
 
 def explicit_rule(domain, client_ip):
     dev=db.device_by_ip(client_ip); did=dev['id'] if dev else 0; uid=dev.get('user_id') if dev else 0
     candidates=[]
     for r in db.dns_rules():
-        if not r['enabled'] or not _hit(domain,r['domain']):continue
+        if not r['enabled'] or not rule_matches(domain,r['domain']):continue
         st=r['scope_type']; sid=int(r['scope_id'] or 0)
-        if st=='global': candidates.append((1,r))
-        elif st=='user' and uid and sid==int(uid): candidates.append((2,r))
-        elif st=='device' and did and sid==int(did): candidates.append((3,r))
-    return sorted(candidates,key=lambda x:x[0],reverse=True)[0][1] if candidates else None
+        if st=='global': candidates.append((1,int(r.get('id') or 0),r))
+        elif st=='user' and uid and sid==int(uid): candidates.append((2,int(r.get('id') or 0),r))
+        elif st=='device' and did and sid==int(did): candidates.append((3,int(r.get('id') or 0),r))
+    # Most-specific scope wins.  For duplicate historical rows, newest rule wins.
+    return sorted(candidates,key=lambda x:(x[0],x[1]),reverse=True)[0][2] if candidates else None
 
 
 def preset_action(domain,c):
@@ -83,10 +113,7 @@ def preset_action(domain,c):
 
 
 def _uplink_gateway(c):
-    """Return explicit DNS fallback or infer the first host of uplink_net.
-
-    For the default QuotaGate topology 192.168.1.0/24 this is 192.168.1.1.
-    """
+    """Return explicit DNS fallback or infer the first host of uplink_net."""
     n=c.get('network',{})
     explicit=str(n.get('dns_fallback') or '').strip()
     try:
@@ -130,7 +157,6 @@ def forward_udp(data,c,client_ip=''):
         s=None
         try:
             s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
-            # Keep failure recovery faster than Android/Windows DNS retry timers.
             s.settimeout(1.0)
             s.sendto(data,(host,53))
             ans,_=s.recvfrom(65535)
@@ -146,32 +172,89 @@ def forward_udp(data,c,client_ip=''):
     return error_reply(data,2)
 
 
+def forward_tcp(data,c,client_ip=''):
+    errors=[]
+    for host in upstreams(c,client_ip):
+        s=None
+        try:
+            s=socket.create_connection((host,53),timeout=1.5)
+            s.settimeout(1.5)
+            s.sendall(struct.pack('!H',len(data))+data)
+            raw_len=_recv_exact(s,2)
+            if len(raw_len)!=2:raise RuntimeError('short DNS TCP length')
+            size=struct.unpack('!H',raw_len)[0]
+            if size<12 or size>65535:raise RuntimeError('invalid DNS TCP response length')
+            ans=_recv_exact(s,size)
+            if len(ans)==size:return ans
+            raise RuntimeError('short DNS TCP response')
+        except Exception as e:
+            errors.append(f'{host}: {e}')
+        finally:
+            try:
+                if s:s.close()
+            except Exception:pass
+    if errors:
+        _log_limited('dns-upstream-tcp','DNS TCP upstream failure; tried fallbacks: '+' | '.join(errors)[:1200])
+    return error_reply(data,2)
+
+
+def process_query(data,c,client_ip,transport='udp'):
+    """Apply global/user/device policy and return (reply, domain, qtype, action)."""
+    q=parse_query(data)
+    if not q:return error_reply(data,1),'','','error'
+    domain,qt,_=q
+    rule=explicit_rule(domain,client_ip)
+    preset=None if rule else preset_action(domain,c)
+    chosen=rule or preset
+    if chosen and chosen.get('action')=='block':
+        return blocked_reply(data),domain,qt,'block'
+    if chosen and chosen.get('action')=='redirect':
+        return redirect_reply(data,chosen.get('target','')),domain,qt,'redirect'
+    forward=forward_tcp if transport=='tcp' else forward_udp
+    return forward(data,c,client_ip),domain,qt,'allow'
+
+
+def _log_query(c,client_ip,domain,qt,action):
+    if domain and c.get('features',{}).get('dns_history',True):
+        try:db.log_dns(client_ip,domain,qt,action)
+        except Exception as e:_log_limited('dns-history','DNS history write failed: '+str(e)[:500],'warning')
+
+
 class UDPHandler(socketserver.BaseRequestHandler):
     def handle(self):
         data,sock=self.request; ip=self.client_address[0]
-        action='allow'; domain=''; qt=''
-        try:
-            q=parse_query(data)
-            if not q:
-                try:sock.sendto(error_reply(data,1),self.client_address)
-                except Exception:pass
-                return
-            domain,qt,_=q
-            rule=explicit_rule(domain,ip)
-            preset=None if rule else preset_action(domain,self.server.cfg)
-            chosen=rule or preset
-            if chosen and chosen.get('action')=='block': ans=blocked_reply(data); action='block'
-            elif chosen and chosen.get('action')=='redirect': ans=redirect_reply(data,chosen.get('target','')); action='redirect'
-            else: ans=forward_udp(data,self.server.cfg,ip)
+        try:ans,domain,qt,action=process_query(data,self.server.cfg,ip)
         except Exception as e:
-            # A database/filter/upstream bug must never make the LAN lose DNS.
             _log_limited('dns-handler','DNS proxy handler exception; returning SERVFAIL: '+str(e)[:900])
-            ans=error_reply(data,2)
+            ans=error_reply(data,2);domain='';qt='';action='error'
         try:sock.sendto(ans,self.client_address)
         except Exception as e:_log_limited('dns-send','DNS proxy response send failed: '+str(e)[:500])
-        if domain and self.server.cfg.get('features',{}).get('dns_history',True):
-            try:db.log_dns(ip,domain,qt,action)
-            except Exception as e:_log_limited('dns-history','DNS history write failed: '+str(e)[:500],'warning')
+        _log_query(self.server.cfg,ip,domain,qt,action)
+
+
+def _recv_exact(sock,size):
+    chunks=[];remaining=int(size)
+    while remaining>0:
+        part=sock.recv(remaining)
+        if not part:return b''
+        chunks.append(part);remaining-=len(part)
+    return b''.join(chunks)
+
+
+class TCPHandler(socketserver.BaseRequestHandler):
+    def handle(self):
+        ip=self.client_address[0];self.request.settimeout(4.0)
+        try:
+            raw_len=_recv_exact(self.request,2)
+            if len(raw_len)!=2:return
+            size=struct.unpack('!H',raw_len)[0]
+            if size<12 or size>65535:return
+            data=_recv_exact(self.request,size)
+            if len(data)!=size:return
+            ans,domain,qt,action=process_query(data,self.server.cfg,ip,transport='tcp')
+            self.request.sendall(struct.pack('!H',len(ans))+ans)
+            _log_query(self.server.cfg,ip,domain,qt,action)
+        except Exception as e:_log_limited('dns-tcp','DNS TCP handler failed: '+str(e)[:700])
 
 
 class ThreadingUDP(socketserver.ThreadingMixIn,socketserver.UDPServer):
@@ -179,15 +262,45 @@ class ThreadingUDP(socketserver.ThreadingMixIn,socketserver.UDPServer):
     allow_reuse_address=True
 
 
+class ThreadingTCP(socketserver.ThreadingMixIn,socketserver.TCPServer):
+    daemon_threads=True
+    allow_reuse_address=True
+
+
 class DNSProxy:
-    def __init__(self,c): self.cfg=c; self.srv=None; self.thread=None
+    def __init__(self,c):
+        self.cfg=c;self.srv=None;self.udp_srv=None;self.tcp_srv=None;self.threads=[]
     def update_config(self,c):
         self.cfg=c
-        if self.srv:self.srv.cfg=c
+        if self.udp_srv:self.udp_srv.cfg=c
+        if self.tcp_srv:self.tcp_srv.cfg=c
     def start(self):
         host=self.cfg['network']['lan_ip']
-        self.srv=ThreadingUDP((host,53),UDPHandler); self.srv.cfg=self.cfg
-        self.thread=threading.Thread(target=self.srv.serve_forever,daemon=True); self.thread.start()
-        _log_limited('dns-start',f'DNS proxy active on {host}:53; upstreams={upstreams(self.cfg)}','info',1)
+        udp=None;tcp=None
+        try:
+            udp=ThreadingUDP((host,53),UDPHandler);udp.cfg=self.cfg
+            tcp=ThreadingTCP((host,53),TCPHandler);tcp.cfg=self.cfg
+            self.udp_srv=udp;self.tcp_srv=tcp;self.srv=udp
+            for name,srv in (('udp',udp),('tcp',tcp)):
+                t=threading.Thread(target=srv.serve_forever,daemon=True,name='quotagate-dns-'+name)
+                t.start();self.threads.append(t)
+        except Exception:
+            for srv in (udp,tcp):
+                try:
+                    if srv:srv.server_close()
+                except Exception:pass
+            self.udp_srv=self.tcp_srv=self.srv=None
+            raise
+        _log_limited('dns-start',f'DNS proxy active on {host}:53 UDP+TCP; upstreams={upstreams(self.cfg)}','info',1)
+    def status(self):
+        live={t.name:t.is_alive() for t in self.threads}
+        return {
+            'udp':bool(self.udp_srv and live.get('quotagate-dns-udp',False)),
+            'tcp':bool(self.tcp_srv and live.get('quotagate-dns-tcp',False)),
+        }
     def stop(self):
-        if self.srv:self.srv.shutdown();self.srv.server_close()
+        for srv in (self.udp_srv,self.tcp_srv):
+            if srv:
+                try:srv.shutdown();srv.server_close()
+                except Exception:pass
+        self.udp_srv=self.tcp_srv=self.srv=None

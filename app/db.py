@@ -1,6 +1,7 @@
 from __future__ import annotations
-import sqlite3, threading, time, json, os
+import sqlite3, threading, time, json, os, re
 from pathlib import Path
+from urllib.parse import urlsplit
 
 DB = Path('/var/lib/quotagate/quotagate.db')
 L = threading.RLock()
@@ -276,12 +277,44 @@ def mac_rules():
 
 def dns_rules():
     with con() as c:return [dict(r) for r in c.execute('SELECT * FROM dns_rules ORDER BY id DESC')]
+
+def normalize_dns_domain(value):
+    raw=str(value or '').strip().lower()
+    if not raw:raise ValueError('domain is required')
+    wildcard=raw.startswith('*.')
+    if wildcard:raw=raw[2:]
+    if '://' in raw:
+        host=urlsplit(raw).hostname or ''
+    else:
+        host=raw.split('/',1)[0].split('?',1)[0].split('#',1)[0]
+        if ':' in host:host=host.split(':',1)[0]
+    host=host.strip().strip('.')
+    if host.startswith('www.'):host=host[4:]
+    try:host=host.encode('idna').decode('ascii').lower()
+    except Exception:raise ValueError('invalid domain')
+    if not host or len(host)>253 or '.' not in host:raise ValueError('invalid domain')
+    labels=host.split('.')
+    if any(not x or len(x)>63 or not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?',x) for x in labels):
+        raise ValueError('invalid domain')
+    return host
+
 def add_dns_rule(scope_type,scope_id,domain,action,target=''):
-    scope_type=str(scope_type).lower();action=str(action).lower();domain=domain.strip().lower().rstrip('.')
+    scope_type=str(scope_type).lower();action=str(action).lower();domain=normalize_dns_domain(domain);scope_id=int(scope_id or 0)
     if scope_type not in ('global','user','device'):raise ValueError('invalid DNS scope')
     if action not in ('block','allow','redirect'):raise ValueError('invalid DNS action')
-    if not domain or len(domain)>253:raise ValueError('invalid domain')
-    with L,con() as c:return c.execute('INSERT OR REPLACE INTO dns_rules(scope_type,scope_id,domain,action,target,enabled) VALUES(?,?,?,?,?,1)',(scope_type,int(scope_id or 0),domain,action,target)).lastrowid
+    if scope_type=='global':scope_id=0
+    if scope_type in ('user','device') and scope_id<=0:raise ValueError('select a valid DNS target')
+    if action=='redirect':
+        import ipaddress
+        try:
+            if ipaddress.ip_address(str(target or '')).version!=4:raise ValueError
+        except Exception:raise ValueError('redirect target must be a valid IPv4 address')
+    with L,con() as c:
+        if scope_type=='user' and not c.execute('SELECT 1 FROM users WHERE id=?',(scope_id,)).fetchone():raise ValueError('DNS user target not found')
+        if scope_type=='device' and not c.execute('SELECT 1 FROM devices WHERE id=?',(scope_id,)).fetchone():raise ValueError('DNS device target not found')
+        # One effective action per scope/domain.  Remove stale historical action rows first.
+        c.execute('DELETE FROM dns_rules WHERE scope_type=? AND scope_id=? AND domain=?',(scope_type,scope_id,domain))
+        return c.execute('INSERT INTO dns_rules(scope_type,scope_id,domain,action,target,enabled) VALUES(?,?,?,?,?,1)',(scope_type,scope_id,domain,action,str(target or ''))).lastrowid
 def del_dns_rule(i):
     with L,con() as c:c.execute('DELETE FROM dns_rules WHERE id=?',(int(i),))
 def log_dns(client_ip,domain,qtype='A',action='allow'):

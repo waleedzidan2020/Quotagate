@@ -107,6 +107,23 @@ def system_info(c):
         except Exception:return ''
     return {'hostname':cmd(['hostname']),'kernel':cmd(['uname','-r']),'uptime':cmd(['uptime','-p']),'interfaces':cmd(['ip','-br','addr']),'version':c.get('version','3.1.0')}
 
+def dns_runtime_status(c):
+    kernel=network.dns_enforcement_status(c)
+    proxy_required=bool(c.get('features',{}).get('dns_proxy',True))
+    proxy={'udp':False,'tcp':False}
+    if DNS:
+        try:proxy=DNS.status()
+        except Exception:pass
+    proxy_ok=(not proxy_required) or bool(proxy.get('udp') and proxy.get('tcp'))
+    kernel_ok=bool(kernel.get('ok',True))
+    return {
+        'ok':bool(proxy_ok and kernel_ok),
+        'proxy_required':proxy_required,
+        'proxy_udp':bool(proxy.get('udp')),
+        'proxy_tcp':bool(proxy.get('tcp')),
+        'enforcement':kernel,
+    }
+
 def shutdown_error(exc):
     try:
         db.event('Server shutdown execution failed: '+str(exc),'error')
@@ -141,13 +158,16 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception as e:return self.json({'error':str(e)},400)
         return self.api_post(urlparse(self.path).path,d)
     def api_get(self,p,q):
-        if p=='/api/health':return self.json({'ok':True,'version':'3.1.0'})
+        if p=='/api/health':
+            c=config.load();dns=dns_runtime_status(c);payload={'ok':bool(dns['ok']),'version':'3.1.0','dns_ok':bool(dns['ok'])}
+            return self.json(payload,200 if payload['ok'] else 503)
         if not self.need():return
         c=config.load()
         if p=='/api/admin/shutdown':return self.json({'error':'method not allowed'},405)
         if p=='/api/status':
             us=quota_view(c,db.users());ds=db.devices();gu=db.gateway_usage();gateway_bytes=int(gu.get('up_bytes',0))+int(gu.get('down_bytes',0));used=gateway_bytes
             return self.json({'users':us,'devices':ds,'events':db.events(80),'alerts':db.alerts(50),'daily':usage_tracker.daily_history(),'bundle':{**c['bundle'],'used_bytes':used,'gateway_bytes':gateway_bytes},'network':c['network'],'wifi':wifi_view(c),'web':c['web'],'mac_rules':db.mac_rules(),'system':system_info(c),'dns':c.get('dns',{}),'updates':{k:v for k,v in c.get('updates',{}).items() if k!='repo'}})
+        if p=='/api/dns/status':return self.json(dns_runtime_status(c))
         if p=='/api/network/priority-status':return self.json(qos_priority.priority_status(db.devices()))
         if p=='/api/gaming/status':return self.json(gaming.status(db.devices()))
         if p=='/api/settings':return self.json(mask_config(c))

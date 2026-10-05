@@ -27,7 +27,7 @@
   "guest": {"enabled": false, "quota_gb": 0.5, "speed_down_kbit": 1024, "speed_up_kbit": 256, "max_devices": 10},
   "security": {"auto_ban": true, "failed_login_limit": 8, "failed_login_window": 300, "ban_seconds": 900},
   "features": {"speed_limits": true, "dns_proxy": true, "dns_history": true, "firewall": true, "pppoe_wan": false},
-  "dns": {"history_days": 7, "max_history_rows": 100000, "family_mode": false, "presets": {"ads_tracking": false, "social": false, "streaming": false, "gambling": false, "adult": false}},
+  "dns": {"history_days": 7, "max_history_rows": 100000, "family_mode": false, "enforce_local": true, "block_dot": true, "presets": {"ads_tracking": false, "social": false, "streaming": false, "gambling": false, "adult": false}},
   "usage": {"enabled": true, "poll_seconds": 2, "speed_smoothing_alpha": 0.4},
   "diagnostics": {"internet_target": "1.1.1.1"},
   "updates": {"repo": "https://github.com/waleedzidan2020/Quotagate.git", "branch": "main", "auto_check": false, "last_check": 0, "available_commit": ""},
