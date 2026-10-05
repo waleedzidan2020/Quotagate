@@ -120,16 +120,19 @@ def status(c):
     return {'enabled':True,'ok':p.returncode==0,'tracked_ips':len({r['ip'] for r in rows})}
 
 
-def _resolve_and_remember(rule,domain,c):
+def _resolve_and_remember(rule,domain,c,sync_after=True):
     ips=_resolve_ipv4(domain)
-    if not ips:return
+    if not ips:return False
     ttl=ttl_seconds(c)
+    changed=False
     for ip in ips:
-        try:db.remember_dns_block_ip(int(rule['id']),domain,ip,ttl)
+        try:
+            db.remember_dns_block_ip(int(rule['id']),domain,ip,ttl);changed=True
         except Exception as e:
             try:db.event('DNS IP guard DB update failed: '+str(e)[:500],'warning')
             except Exception:pass
-    sync(c)
+    if changed and sync_after:sync(c)
+    return changed
 
 
 def observe_block(rule,domain,c):
@@ -152,5 +155,8 @@ def seed_rule(rule,domains,c):
         if len(seen)>=40:break
     if not seen:return
     def run_seed():
-        for domain in seen:_resolve_and_remember(rule,domain,c)
+        changed=False
+        for domain in seen:
+            if _resolve_and_remember(rule,domain,c,sync_after=False):changed=True
+        if changed:sync(c)
     threading.Thread(target=run_seed,daemon=True,name='qg-dns-ip-seed').start()
