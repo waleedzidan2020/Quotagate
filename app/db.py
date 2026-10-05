@@ -102,6 +102,15 @@ CREATE TABLE IF NOT EXISTS dns_history(
 );
 CREATE INDEX IF NOT EXISTS idx_dns_hist_ts ON dns_history(ts);
 CREATE INDEX IF NOT EXISTS idx_dns_hist_dev ON dns_history(device_id, ts);
+CREATE TABLE IF NOT EXISTS dns_block_ips(
+ rule_id INTEGER NOT NULL REFERENCES dns_rules(id) ON DELETE CASCADE,
+ domain TEXT NOT NULL,
+ ip TEXT NOT NULL,
+ expires_at INTEGER NOT NULL,
+ last_seen INTEGER NOT NULL,
+ PRIMARY KEY(rule_id, ip)
+);
+CREATE INDEX IF NOT EXISTS idx_dns_block_exp ON dns_block_ips(expires_at);
 CREATE TABLE IF NOT EXISTS firewall_rules(
  id INTEGER PRIMARY KEY AUTOINCREMENT,
  name TEXT NOT NULL,
@@ -156,7 +165,7 @@ def init():
             'manufacturer':"ALTER TABLE devices ADD COLUMN manufacturer TEXT NOT NULL DEFAULT ''",
         }.items():
             if name not in dcols:c.execute(ddl)
-        c.execute("INSERT INTO settings(key,value) VALUES('schema_version','4') ON CONFLICT(key) DO UPDATE SET value='4'")
+        c.execute("INSERT INTO settings(key,value) VALUES('schema_version','5') ON CONFLICT(key) DO UPDATE SET value='5'")
 
 def period(ts=None):return time.strftime('%Y-%m',time.localtime(ts or time.time()))
 def day(ts=None):return time.strftime('%Y-%m-%d',time.localtime(ts or time.time()))
@@ -277,6 +286,41 @@ def mac_rules():
 
 def dns_rules():
     with con() as c:return [dict(r) for r in c.execute('SELECT * FROM dns_rules ORDER BY id DESC')]
+
+def dns_rule(i):
+    with con() as c:
+        r=c.execute('SELECT * FROM dns_rules WHERE id=?',(int(i),)).fetchone()
+        return dict(r) if r else None
+
+def remember_dns_block_ip(rule_id,domain,ip,ttl=300):
+    now=int(time.time());ttl=max(30,min(int(ttl),3600))
+    with L,con() as c:
+        c.execute('''INSERT INTO dns_block_ips(rule_id,domain,ip,expires_at,last_seen)
+                     VALUES(?,?,?,?,?)
+                     ON CONFLICT(rule_id,ip) DO UPDATE SET
+                       domain=excluded.domain,
+                       expires_at=excluded.expires_at,
+                       last_seen=excluded.last_seen''',
+                  (int(rule_id),str(domain)[:253],str(ip),now+ttl,now))
+
+def dns_block_ips(now=None):
+    now=int(now or time.time())
+    with con() as c:
+        return [dict(r) for r in c.execute(
+            '''SELECT b.*,r.scope_type,r.scope_id,r.domain rule_domain,r.action,r.enabled
+               FROM dns_block_ips b JOIN dns_rules r ON r.id=b.rule_id
+               WHERE b.expires_at>? AND r.enabled=1 AND r.action='block'
+               ORDER BY b.rule_id,b.ip''',(now,))]
+
+def prune_dns_block_ips(now=None):
+    now=int(now or time.time())
+    with L,con() as c:c.execute('DELETE FROM dns_block_ips WHERE expires_at<=?',(now,))
+
+def recent_dns_domains(limit=400):
+    limit=max(1,min(int(limit),2000))
+    with con() as c:
+        return [r['domain'] for r in c.execute(
+            'SELECT domain FROM dns_history GROUP BY domain ORDER BY MAX(id) DESC LIMIT ?',(limit,))]
 
 def normalize_dns_domain(value):
     raw=str(value or '').strip().lower()

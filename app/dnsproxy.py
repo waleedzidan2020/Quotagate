@@ -1,6 +1,6 @@
 from __future__ import annotations
 import socket, socketserver, struct, threading, ipaddress, time
-from . import db
+from . import db, domainblock
 
 QTYPE={1:'A',28:'AAAA',5:'CNAME',15:'MX',16:'TXT',2:'NS'}
 PRESETS={
@@ -207,6 +207,9 @@ def process_query(data,c,client_ip,transport='udp'):
     preset=None if rule else preset_action(domain,c)
     chosen=rule or preset
     if chosen and chosen.get('action')=='block':
+        if rule and rule.get('id'):
+            try:domainblock.observe_block(rule,domain,c)
+            except Exception as e:_log_limited('dns-ip-guard','DNS IP guard observe failed: '+str(e)[:500],'warning')
         return blocked_reply(data),domain,qt,'block'
     if chosen and chosen.get('action')=='redirect':
         return redirect_reply(data,chosen.get('target','')),domain,qt,'redirect'

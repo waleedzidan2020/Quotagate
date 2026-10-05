@@ -12,7 +12,7 @@
     const info=document.createElement('div');
     info.id='dnsEnforcementInfo';
     info.className='notice';
-    info.innerHTML='<b id="dnsRuntimeStatus" class="muted">DNS Enforcement: checking...</b><br><small>اكتب الدومين فقط مثل youtube.com. يتم حجب الدومين وكل Subdomains، ويتم إجبار DNS العادي TCP/UDP 53 على المرور عبر QuotaGate مع منع DNS-over-TLS على 853. اختيار جهاز يطبق القاعدة على هذا الجهاز فقط.</small><br><small class="muted">ملاحظة: Secure DNS / DoH عبر HTTPS 443 لا يمكن ضمان منعه بالكامل بفلترة DNS فقط.</small>';
+    info.innerHTML='<b id="dnsRuntimeStatus" class="muted">DNS Enforcement: checking...</b><br><small>اكتب الدومين فقط مثل youtube.com. يتم حجب الدومين وكل Subdomains، ويتم إجبار DNS العادي TCP/UDP 53 على المرور عبر QuotaGate مع منع DNS-over-TLS على 853. اختيار جهاز يطبق القاعدة على هذا الجهاز فقط.</small><br><small class="muted">يتم أيضًا إنشاء حظر IP قصير المدى للدومينات المحجوبة لقطع جلسات HTTPS/QUIC المفتوحة أو عناوين DNS المخزنة. Secure DNS / DoH غير المعروف عبر HTTPS 443 لا يمكن اكتشافه عالميًا بدون اعتراض HTTPS.</small>';
     card.appendChild(info);
     loadDnsRuntimeStatus();
   }
@@ -23,8 +23,9 @@
     try{
       const j=await api('/api/dns/status');
       const e=j.enforcement||{};
+      const g=j.ip_guard||{};
       if(j.ok){
-        box.textContent='DNS Enforcement: ACTIVE ✅ — UDP/TCP proxy + forced DNS' + (e.dot_block?' + DoT blocked':'');
+        box.textContent='DNS Enforcement: ACTIVE ✅ — UDP/TCP proxy + forced DNS' + (e.dot_block?' + DoT blocked':'') + (g.enabled?' + Active-session IP guard ('+(g.tracked_ips||0)+')':'');
         box.className='ok';
       }else{
         const missing=[];
@@ -33,6 +34,7 @@
         if(e.enabled&&!e.udp53)missing.push('UDP/53 redirect');
         if(e.enabled&&!e.tcp53)missing.push('TCP/53 redirect');
         if(e.enabled&&!e.dot_block)missing.push('DoT block');
+        if(g.enabled&&!g.ok)missing.push('active-session IP guard');
         box.textContent='DNS Enforcement: ERROR ❌'+(missing.length?' — '+missing.join(', '):'');
         box.className='bad';
       }
@@ -123,6 +125,8 @@
       });
       $('dnsDomain').value='';
       await enhancedLoadDnsRules();
+      setTimeout(loadDnsRuntimeStatus,800);
+      setTimeout(loadDnsRuntimeStatus,2500);
       const suffix=scope==='global'?'على كل الأجهزة':scope==='device'?'على الجهاز المحدد':'على المستخدم المحدد';
       toast(`<h3>تم تطبيق قاعدة DNS</h3><p><b>${esc(raw)}</b> — ${esc(suffix)}</p>`);
     }catch(e){
