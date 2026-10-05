@@ -44,7 +44,9 @@ def parse_query(data):
         ln=data[off]; off+=1
         if ln==0: break
         if off+ln>len(data): return None
-        labels.append(data[off:off+ln].decode('idna','ignore')); off+=ln
+        try:label=data[off:off+ln].decode('ascii')
+        except UnicodeDecodeError:return None
+        labels.append(label); off+=ln
     if off+4>len(data): return None
     qt=struct.unpack('!H',data[off:off+2])[0]
     return '.'.join(labels).lower().rstrip('.'), QTYPE.get(qt,str(qt)), off+4
