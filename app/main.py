@@ -91,7 +91,9 @@ def refresh_dns_ip_guard(c,rule_id=None):
 def maintenance_refresh(kind,c):
     global DNS
     if kind in ('policy','policy_dns'):apply(c)
-    if kind in ('dns','policy_dns') and DNS:DNS.update_config(c)
+    if kind in ('dns','policy_dns'):
+        domainblock.sync(c,force=True)
+        if DNS:DNS.update_config(c)
 
 def maybe_reset(c):
     b=c['bundle']
