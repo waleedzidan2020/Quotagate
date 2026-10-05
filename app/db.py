@@ -289,6 +289,7 @@ def normalize_dns_domain(value):
         host=raw.split('/',1)[0].split('?',1)[0].split('#',1)[0]
         if ':' in host:host=host.split(':',1)[0]
     host=host.strip().strip('.')
+    if host.startswith('www.'):host=host[4:]
     try:host=host.encode('idna').decode('ascii').lower()
     except Exception:raise ValueError('invalid domain')
     if not host or len(host)>253 or '.' not in host:raise ValueError('invalid domain')
