@@ -31,12 +31,14 @@ def check_scoped_policy() -> None:
     original_device = dnsproxy.db.device_by_ip
     original_rules = dnsproxy.db.dns_rules
     original_forward = dnsproxy.forward_udp
+    original_forward_tcp = dnsproxy.forward_tcp
     try:
         dnsproxy.db.device_by_ip = lambda ip: (
             {'id': 7, 'user_id': 3} if ip == '192.168.2.50'
             else {'id': 8, 'user_id': 4}
         )
         dnsproxy.forward_udp = lambda data, c, client_ip='': b'FORWARDED'
+        dnsproxy.forward_tcp = lambda data, c, client_ip='': b'TCP_FORWARDED'
 
         # A device-only block must affect exactly that device.
         dnsproxy.db.dns_rules = lambda: [
@@ -46,6 +48,9 @@ def check_scoped_policy() -> None:
         assert domain == 'www.example.com' and action == 'block' and rcode(ans) == 3
         ans, _, _, action = dnsproxy.process_query(query('www.example.com'), {}, '192.168.2.51')
         assert ans == b'FORWARDED' and action == 'allow'
+
+        ans, _, _, action = dnsproxy.process_query(query('www.example.com'), {}, '192.168.2.51', transport='tcp')
+        assert ans == b'TCP_FORWARDED' and action == 'allow'
 
         # A global youtube.com block expands to YouTube media/CDN hostnames.
         dnsproxy.db.dns_rules = lambda: [
@@ -67,6 +72,7 @@ def check_scoped_policy() -> None:
         dnsproxy.db.device_by_ip = original_device
         dnsproxy.db.dns_rules = original_rules
         dnsproxy.forward_udp = original_forward
+        dnsproxy.forward_tcp = original_forward_tcp
 
 
 def check_network_enforcement() -> None:
@@ -89,6 +95,26 @@ def check_network_enforcement() -> None:
     assert len(dot) == 2
     assert all('853' in cmd and cmd[-1] == 'drop' for cmd in dot)
 
+    original_run = network.run
+    class P:
+        def __init__(self, out, code=0):
+            self.stdout = out
+            self.stderr = ''
+            self.returncode = code
+    try:
+        def fake_run(cmd, check=False, input_text=None):
+            text = ' '.join(cmd)
+            if 'quotagate_nat prerouting' in text:
+                return P('udp dport 53 dnat to 192.168.2.1:53\ntcp dport 53 dnat to 192.168.2.1:53\n')
+            if 'inet quotagate forward' in text:
+                return P('tcp dport 853 drop\nudp dport 853 drop\n')
+            return P('', 1)
+        network.run = fake_run
+        status = network.dns_enforcement_status(c)
+        assert status['ok'] and status['udp53'] and status['tcp53'] and status['dot_block']
+    finally:
+        network.run = original_run
+
     c['dns']['enforce_local'] = False
     assert network.dns_redirect_commands(c) == []
     assert network.dns_dot_block_commands(c) == []
@@ -102,6 +128,7 @@ def check_frontend() -> None:
     assert "اختر جهازاً" in js
     assert "youtube.com" in js
     assert "/api/dns/rule/add" in js
+    assert "/api/dns/status" in js
 
 
 if __name__ == '__main__':
