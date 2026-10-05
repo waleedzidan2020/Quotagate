@@ -96,6 +96,7 @@ jobs:
           node --check web/guest-mode.js
           node --check web/guest-shaping.js
           node --check web/live-usage.js
+          node --check web/dns-filtering.js
       - name: Shell syntax
         run: |
           bash -n install.sh
