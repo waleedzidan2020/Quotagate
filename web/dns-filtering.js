@@ -125,6 +125,8 @@
       });
       $('dnsDomain').value='';
       await enhancedLoadDnsRules();
+      setTimeout(loadDnsRuntimeStatus,800);
+      setTimeout(loadDnsRuntimeStatus,2500);
       const suffix=scope==='global'?'على كل الأجهزة':scope==='device'?'على الجهاز المحدد':'على المستخدم المحدد';
       toast(`<h3>تم تطبيق قاعدة DNS</h3><p><b>${esc(raw)}</b> — ${esc(suffix)}</p>`);
     }catch(e){
