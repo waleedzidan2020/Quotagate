@@ -4,8 +4,8 @@ from http.cookies import SimpleCookie
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
-from . import auth, config, db, network, diagnostics, usage_tracker, maintenance, gaming, qos_priority, system_power
-from .dnsproxy import DNSProxy
+from . import auth, config, db, network, diagnostics, usage_tracker, maintenance, gaming, qos_priority, system_power, domainblock
+from .dnsproxy import DNSProxy, rule_patterns, rule_matches
 
 ROOT=Path(__file__).resolve().parent.parent; WEB=ROOT/'web'; LOCK=threading.RLock(); SESSIONS={}; FAILS={}; BANS={}; REQS={}; DNS=None
 
@@ -64,6 +64,30 @@ def scan(c):
 def apply(c):
     us=db.users();ds=db.devices();rebuilt=network.sync_rules(c,ds,network.blocked(c,us,ds));network.shaping(c,ds,us);network.sync_dnsmasq(c);return rebuilt
 
+def dns_seed_domains(rule):
+    root=str(rule.get('domain') or '').lower().rstrip('.')
+    out=[]
+    for p in rule_patterns(root):
+        p=str(p or '').lower().rstrip('.')
+        if p and p not in out:out.append(p)
+        if p and not p.startswith('www.') and p.count('.')>=1:
+            w='www.'+p
+            if w not in out:out.append(w)
+    try:
+        for d in db.recent_dns_domains(500):
+            if rule_matches(d,root) and d not in out:out.append(d)
+            if len(out)>=40:break
+    except Exception:pass
+    return out[:40]
+
+def refresh_dns_ip_guard(c,rule_id=None):
+    result=domainblock.sync(c,force=True)
+    if rule_id:
+        rule=db.dns_rule(int(rule_id))
+        if rule and rule.get('enabled') and rule.get('action')=='block':
+            domainblock.seed_rule(rule,dns_seed_domains(rule),c)
+    return result
+
 def maintenance_refresh(kind,c):
     global DNS
     if kind in ('policy','policy_dns'):apply(c)
@@ -93,6 +117,7 @@ def worker():
         try:
             c=config.load();maybe_reset(c);gaming.tick(c);scan(c);apply(c)
             dcfg=c.get('dns',{});db.prune_dns(dcfg.get('history_days',7),dcfg.get('max_history_rows',100000))
+            domainblock.sync(c)
             if DNS:DNS.update_config(c)
             u=c.get('updates',{})
             if u.get('auto_check') and time.time()-int(u.get('last_check',0) or 0)>86400:update_status(c,True)
@@ -116,12 +141,15 @@ def dns_runtime_status(c):
         except Exception:pass
     proxy_ok=(not proxy_required) or bool(proxy.get('udp') and proxy.get('tcp'))
     kernel_ok=bool(kernel.get('ok',True))
+    guard=domainblock.status(c)
+    guard_ok=bool(guard.get('ok',True))
     return {
-        'ok':bool(proxy_ok and kernel_ok),
+        'ok':bool(proxy_ok and kernel_ok and guard_ok),
         'proxy_required':proxy_required,
         'proxy_udp':bool(proxy.get('udp')),
         'proxy_tcp':bool(proxy.get('tcp')),
         'enforcement':kernel,
+        'ip_guard':guard,
     }
 
 def shutdown_error(exc):
@@ -292,8 +320,13 @@ class Handler(SimpleHTTPRequestHandler):
                 if not auth.verify_totp(c['admin'].get('totp_secret',''),str(d.get('code',''))):return self.json({'error':'invalid code'},400)
                 c['admin']['totp_enabled']=True;config.save(c);return self.json({'ok':True})
             if p=='/api/2fa/disable':c['admin']['totp_enabled']=False;c['admin']['totp_secret']='';config.save(c);return self.json({'ok':True})
-            if p=='/api/dns/rule/add':db.add_dns_rule(d.get('scope_type','global'),int(d.get('scope_id',0)),d['domain'],d.get('action','block'),d.get('target',''));return self.json({'ok':True})
-            if p=='/api/dns/rule/delete':db.del_dns_rule(int(d['id']));return self.json({'ok':True})
+            if p=='/api/dns/rule/add':
+                rid=db.add_dns_rule(d.get('scope_type','global'),int(d.get('scope_id',0)),d['domain'],d.get('action','block'),d.get('target',''))
+                guard=refresh_dns_ip_guard(c,rid)
+                return self.json({'ok':True,'id':rid,'ip_guard':guard})
+            if p=='/api/dns/rule/delete':
+                db.del_dns_rule(int(d['id']));guard=refresh_dns_ip_guard(c)
+                return self.json({'ok':True,'ip_guard':guard})
             if p=='/api/firewall/rule/add':db.add_firewall_rule(d);apply(c);return self.json({'ok':True})
             if p=='/api/firewall/rule/update':x=dict(d);i=int(x.pop('id'));db.update_firewall_rule(i,x);apply(c);return self.json({'ok':True})
             if p=='/api/firewall/rule/delete':db.del_firewall_rule(int(d['id']));apply(c);return self.json({'ok':True})
@@ -324,6 +357,11 @@ def main():
     except Exception as e:db.event('network startup: '+str(e),'error')
     try:apply(c)
     except Exception as e:db.event('policy startup: '+str(e),'error')
+    try:
+        domainblock.sync(c,force=True)
+        for rule in db.dns_rules():
+            if rule.get('enabled') and rule.get('action')=='block':domainblock.seed_rule(rule,dns_seed_domains(rule),c)
+    except Exception as e:db.event('DNS IP guard startup: '+str(e),'error')
     if c.get('features',{}).get('dns_proxy',True):
         try:DNS=DNSProxy(c);DNS.start();db.event('DNS proxy listening on '+c['network']['lan_ip']+':53')
         except Exception as e:db.event('DNS proxy: '+str(e),'error')
