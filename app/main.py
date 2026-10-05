@@ -4,7 +4,7 @@ from http.cookies import SimpleCookie
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
-from . import auth, config, db, network, diagnostics, usage_tracker, maintenance, gaming, qos_priority, system_power, domainblock
+from . import auth, config, db, network, diagnostics, usage_tracker, maintenance, gaming, qos_priority, system_power, domainblock, static_ip
 from .dnsproxy import DNSProxy, rule_patterns, rule_matches
 
 ROOT=Path(__file__).resolve().parent.parent; WEB=ROOT/'web'; LOCK=threading.RLock(); SESSIONS={}; FAILS={}; BANS={}; REQS={}; DNS=None
@@ -198,6 +198,9 @@ class Handler(SimpleHTTPRequestHandler):
             us=quota_view(c,db.users());ds=db.devices();gu=db.gateway_usage();gateway_bytes=int(gu.get('up_bytes',0))+int(gu.get('down_bytes',0));used=gateway_bytes
             return self.json({'users':us,'devices':ds,'events':db.events(80),'alerts':db.alerts(50),'daily':usage_tracker.daily_history(),'bundle':{**c['bundle'],'used_bytes':used,'gateway_bytes':gateway_bytes},'network':c['network'],'wifi':wifi_view(c),'web':c['web'],'mac_rules':db.mac_rules(),'system':system_info(c),'dns':c.get('dns',{}),'updates':{k:v for k,v in c.get('updates',{}).items() if k!='repo'}})
         if p=='/api/dns/status':return self.json(dns_runtime_status(c))
+        if p=='/api/device/static-ip/status':
+            did=int((q.get('device_id') or ['0'])[0])
+            return self.json(static_ip.device_status(did,c))
         if p=='/api/network/priority-status':return self.json(qos_priority.priority_status(db.devices()))
         if p=='/api/gaming/status':return self.json(gaming.status(db.devices()))
         if p=='/api/settings':return self.json(mask_config(c))
@@ -272,13 +275,30 @@ class Handler(SimpleHTTPRequestHandler):
                     except Exception:pass
                     raise
             if p=='/api/gaming/stop':gaming.stop('manual');apply(c);return self.json({'active':False,'restored':True})
-            if p=='/api/device/update':x=dict(d);i=int(x.pop('id'));db.update_device(i,**x);apply(c);return self.json({'ok':True})
+            if p=='/api/device/update':
+                x=dict(d);i=int(x.pop('id'));reservation_present='reserved_ip' in x
+                before=static_ip.device_status(i,c) if reservation_present else None
+                db.update_device(i,**x);apply(c)
+                result={'ok':True}
+                if reservation_present:
+                    after=static_ip.device_status(i,c)
+                    changed=str((before or {}).get('reserved_ip') or '')!=str(after.get('reserved_ip') or '')
+                    if changed and after.get('reserved_ip'):
+                        result['static_ip']=static_ip.apply_reservation_now(i,c,reload_dnsmasq=False)
+                    else:
+                        result['static_ip']=after
+                return self.json(result)
+            if p=='/api/device/static-ip/apply':
+                i=int(d.get('device_id') or d.get('id') or 0)
+                return self.json({'ok':True,'static_ip':static_ip.apply_reservation_now(i,c,reload_dnsmasq=True)})
             if p=='/api/device/delete':
                 ds={x['id']:x for x in db.devices()};i=int(d['id']);old=ds.get(i)
                 if old:db.mac_rule(old['mac'],'blacklist','deleted device')
                 db.delete_device(i);apply(c);return self.json({'ok':True})
             if p=='/api/mac-rule':db.mac_rule(d['mac'],d.get('action'),d.get('note',''));apply(c);return self.json({'ok':True})
-            if p=='/api/network/rescan':scan(c);apply(c);return self.json({'ok':True})
+            if p=='/api/network/rescan':
+                scan(c);apply(c)
+                return self.json({'ok':True})
             if p=='/api/policy/apply':apply(c);return self.json({'ok':True})
             if p=='/api/reset-month':db.reset_month();return self.json({'ok':True})
             if p=='/api/settings':
