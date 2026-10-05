@@ -292,6 +292,12 @@ class DNSProxy:
             self.udp_srv=self.tcp_srv=self.srv=None
             raise
         _log_limited('dns-start',f'DNS proxy active on {host}:53 UDP+TCP; upstreams={upstreams(self.cfg)}','info',1)
+    def status(self):
+        live={t.name:t.is_alive() for t in self.threads}
+        return {
+            'udp':bool(self.udp_srv and live.get('quotagate-dns-udp',False)),
+            'tcp':bool(self.tcp_srv and live.get('quotagate-dns-tcp',False)),
+        }
     def stop(self):
         for srv in (self.udp_srv,self.tcp_srv):
             if srv:
