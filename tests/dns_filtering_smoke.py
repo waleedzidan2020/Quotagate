@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import struct
+import tempfile
 from pathlib import Path
 
-from app import db, dnsproxy, network
+from app import db, dnsproxy, network, domainblock
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -32,6 +33,7 @@ def check_scoped_policy() -> None:
     original_rules = dnsproxy.db.dns_rules
     original_forward = dnsproxy.forward_udp
     original_forward_tcp = dnsproxy.forward_tcp
+    original_observe = dnsproxy.domainblock.observe_block
     try:
         dnsproxy.db.device_by_ip = lambda ip: (
             {'id': 7, 'user_id': 3} if ip == '192.168.2.50'
@@ -39,6 +41,7 @@ def check_scoped_policy() -> None:
         )
         dnsproxy.forward_udp = lambda data, c, client_ip='': b'FORWARDED'
         dnsproxy.forward_tcp = lambda data, c, client_ip='': b'TCP_FORWARDED'
+        dnsproxy.domainblock.observe_block = lambda rule, domain, cfg: None
 
         # A device-only block must affect exactly that device.
         dnsproxy.db.dns_rules = lambda: [
@@ -73,6 +76,7 @@ def check_scoped_policy() -> None:
         dnsproxy.db.dns_rules = original_rules
         dnsproxy.forward_udp = original_forward
         dnsproxy.forward_tcp = original_forward_tcp
+        dnsproxy.domainblock.observe_block = original_observe
 
 
 def check_network_enforcement() -> None:
@@ -120,6 +124,81 @@ def check_network_enforcement() -> None:
     assert network.dns_dot_block_commands(c) == []
 
 
+
+def check_ip_guard_db() -> None:
+    original_db = db.DB
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            db.DB = Path(td) / 'qg.db'
+            db.init()
+            rid = db.add_dns_rule('global', 0, 'youtube.com', 'block')
+            db.remember_dns_block_ip(rid, 'www.youtube.com', '142.250.1.10', 300)
+            rows = db.dns_block_ips()
+            assert len(rows) == 1 and rows[0]['rule_id'] == rid
+            assert rows[0]['scope_type'] == 'global' and rows[0]['action'] == 'block'
+            db.del_dns_rule(rid)
+            assert db.dns_block_ips() == []
+    finally:
+        db.DB = original_db
+
+
+def check_ip_guard_nft() -> None:
+    cfg = {
+        'features': {'dns_proxy': True},
+        'dns': {'ip_guard_enabled': True, 'ip_guard_seconds': 300},
+        'network': {'client_net': '192.168.2.0/24'},
+    }
+    rows = [
+        {'rule_id': 1, 'domain': 'www.youtube.com', 'ip': '142.250.1.10', 'scope_type': 'global', 'scope_id': 0},
+        {'rule_id': 2, 'domain': 'example.com', 'ip': '203.0.113.20', 'scope_type': 'device', 'scope_id': 7},
+        {'rule_id': 3, 'domain': 'example.net', 'ip': '198.51.100.30', 'scope_type': 'user', 'scope_id': 3},
+    ]
+    devices = [
+        {'id': 7, 'ip': '192.168.2.50', 'user_id': 3},
+        {'id': 8, 'ip': '192.168.2.51', 'user_id': 3},
+    ]
+    original_run = domainblock.network.run
+    original_prune = domainblock.db.prune_dns_block_ips
+    original_rows = domainblock.db.dns_block_ips
+    original_devices = domainblock.db.devices
+    original_sig = domainblock._SYNC_SIG
+    calls = []
+    class P:
+        def __init__(self, code=0, out=''):
+            self.returncode = code
+            self.stdout = out
+            self.stderr = ''
+    try:
+        domainblock.db.prune_dns_block_ips = lambda: None
+        domainblock.db.dns_block_ips = lambda: list(rows)
+        domainblock.db.devices = lambda: list(devices)
+        def fake_run(cmd, check=False, input_text=None):
+            calls.append((list(cmd), input_text))
+            if cmd[:3] == ['nft', 'delete', 'table']:
+                return P(1)
+            return P(0, 'table inet quotagate_dnsblock {}')
+        domainblock.network.run = fake_run
+        result = domainblock.sync(cfg, force=True)
+        assert result['ok'] and result['tracked_ips'] == 3
+        scripts = [text for cmd, text in calls if cmd == ['nft', '-f', '-']]
+        assert len(scripts) == 1
+        script = scripts[0]
+        assert 'table inet quotagate_dnsblock' in script
+        assert 'ip saddr 192.168.2.0/24 ip daddr @global_v4 counter drop' in script
+        assert 'ip saddr 192.168.2.50 ip daddr @d_7_v4 counter drop' in script
+        assert 'ip saddr 192.168.2.50 ip daddr @u_3_v4 counter drop' in script
+        assert 'ip saddr 192.168.2.51 ip daddr @u_3_v4 counter drop' in script
+        assert 'priority -20' in script
+        st = domainblock.status(cfg)
+        assert st['ok'] and st['tracked_ips'] == 3
+    finally:
+        domainblock.network.run = original_run
+        domainblock.db.prune_dns_block_ips = original_prune
+        domainblock.db.dns_block_ips = original_rows
+        domainblock.db.devices = original_devices
+        domainblock._SYNC_SIG = original_sig
+
+
 def check_frontend() -> None:
     js = (ROOT / 'web' / 'dns-filtering.js').read_text(encoding='utf-8')
     loader = (ROOT / 'web' / 'app.js').read_text(encoding='utf-8')
@@ -129,11 +208,14 @@ def check_frontend() -> None:
     assert "youtube.com" in js
     assert "/api/dns/rule/add" in js
     assert "/api/dns/status" in js
+    assert "Active-session IP guard" in js
 
 
 if __name__ == '__main__':
     check_normalization_and_groups()
     check_scoped_policy()
     check_network_enforcement()
+    check_ip_guard_db()
+    check_ip_guard_nft()
     check_frontend()
     print('DNS filtering smoke checks: OK')
