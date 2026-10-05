@@ -203,11 +203,11 @@ def dns_enforcement_status(c):
     nt=(nat.stdout or '') if nat.returncode==0 else ''
     ft=(filt.stdout or '') if filt.returncode==0 else ''
     target=str(c['network']['lan_ip'])+':53'
-    udp53=('udp dport 53' in nt and ('dnat to '+target) in nt)
-    tcp53=('tcp dport 53' in nt and ('dnat to '+target) in nt)
+    udp53=bool(re.search(r'udp dport 53\\b[^\\n]*\\bdnat to '+re.escape(target),nt))
+    tcp53=bool(re.search(r'tcp dport 53\\b[^\\n]*\\bdnat to '+re.escape(target),nt))
     want_dot=bool(c.get('dns',{}).get('block_dot',True))
-    tcp853=('tcp dport 853' in ft and 'drop' in ft)
-    udp853=('udp dport 853' in ft and 'drop' in ft)
+    tcp853=bool(re.search(r'tcp dport 853\\b[^\\n]*\\bdrop\\b',ft))
+    udp853=bool(re.search(r'udp dport 853\\b[^\\n]*\\bdrop\\b',ft))
     dot_ok=(tcp853 and udp853) if want_dot else True
     return {
         'enabled':True,
