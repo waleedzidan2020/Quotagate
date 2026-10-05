@@ -174,6 +174,27 @@ def ensure_firewall(c):
     if p.returncode:raise RuntimeError(p.stderr.strip())
     rebuild_rules(c,db.devices())
 
+def dns_enforcement_enabled(c):
+    return bool(c.get('features',{}).get('dns_proxy',True) and c.get('dns',{}).get('enforce_local',True))
+
+def dns_redirect_commands(c):
+    """Force classic DNS from LAN clients through QuotaGate's local proxy."""
+    if not dns_enforcement_enabled(c):return []
+    n=c['network'];lan=n['lan_interface'];net=n['client_net'];target=f"{n['lan_ip']}:53"
+    return [
+        ['nft','add','rule','ip','quotagate_nat','prerouting','iifname',lan,'ip','saddr',net,'ip','protocol','udp','udp','dport','53','dnat','to',target],
+        ['nft','add','rule','ip','quotagate_nat','prerouting','iifname',lan,'ip','saddr',net,'ip','protocol','tcp','tcp','dport','53','dnat','to',target],
+    ]
+
+def dns_dot_block_commands(c):
+    """Block DNS-over-TLS/QUIC on port 853 so clients cannot bypass local DNS that way."""
+    if not dns_enforcement_enabled(c) or not c.get('dns',{}).get('block_dot',True):return []
+    n=c['network'];lan=n['lan_interface'];net=n['client_net']
+    return [
+        ['nft','add','rule','inet','quotagate','forward','iifname',lan,'ip','saddr',net,'ip','protocol','tcp','tcp','dport','853','drop'],
+        ['nft','add','rule','inet','quotagate','forward','iifname',lan,'ip','saddr',net,'ip','protocol','udp','udp','dport','853','drop'],
+    ]
+
 def _valid_ip_or_net(v):
     if not v:return True
     try:ipaddress.ip_network(v,strict=False);return True
@@ -193,6 +214,7 @@ def rebuild_rules(c,devices):
         except Exception:continue
         run(['nft','add','rule','inet','quotagate','forward','ip','saddr',ip,'ip','daddr','!=',net,'ip','daddr','!=',uplink,'counter','comment',f"qg:{d['id']}:up"]);run(['nft','add','rule','inet','quotagate','forward','ip','daddr',ip,'ip','saddr','!=',net,'ip','saddr','!=',uplink,'counter','comment',f"qg:{d['id']}:down"])
     run(['nft','add','rule','inet','quotagate','forward','ip','saddr','@blocked_v4','drop']);run(['nft','add','rule','inet','quotagate','forward','ip','daddr','@blocked_v4','drop'])
+    for cmd in dns_dot_block_commands(c):run(cmd)
     for r in db.firewall_rules():
         if not r['enabled'] or r['direction']!='forward':continue
         if not _valid_ip_or_net(r['src']) or not _valid_ip_or_net(r['dst']) or not _valid_port(r['sport']) or not _valid_port(r['dport']):continue
@@ -206,6 +228,7 @@ def rebuild_rules(c,devices):
         args+=[r['action'] if r['action'] in ('accept','drop','reject') else 'drop'];run(args)
     run(['nft','add','rule','inet','quotagate','forward','ct','state','established,related','accept']);run(['nft','add','rule','inet','quotagate','forward','iifname',lan,'oifname',wan,'ip','saddr',net,'accept'])
     run(['nft','flush','chain','ip','quotagate_nat','prerouting'])
+    for cmd in dns_redirect_commands(c):run(cmd)
     for r in db.port_forwards():
         if not r['enabled']:continue
         try:
@@ -220,7 +243,7 @@ def rebuild_rules(c,devices):
 
 def sync_rules(c,devices,blocked_ips):
     global _RULE_SIG,_BLOCK_SIG
-    fw=tuple(tuple(r.get(k) for k in ('id','name','direction','src','dst','proto','sport','dport','action','enabled','priority')) for r in db.firewall_rules());pf=tuple(tuple(r.get(k) for k in ('id','name','proto','external_port','internal_ip','internal_port','enabled')) for r in db.port_forwards());sig=(tuple(sorted((d['id'],d.get('ip','')) for d in devices)),fw,pf,c['network'].get('dmz_ip',''),c['network'].get('vpn_share',False),wan_interface(c));rebuilt=False
+    fw=tuple(tuple(r.get(k) for k in ('id','name','direction','src','dst','proto','sport','dport','action','enabled','priority')) for r in db.firewall_rules());pf=tuple(tuple(r.get(k) for k in ('id','name','proto','external_port','internal_ip','internal_port','enabled')) for r in db.port_forwards());dns_sig=(dns_enforcement_enabled(c),bool(c.get('dns',{}).get('block_dot',True)));sig=(tuple(sorted((d['id'],d.get('ip','')) for d in devices)),fw,pf,c['network'].get('dmz_ip',''),c['network'].get('vpn_share',False),wan_interface(c),dns_sig);rebuilt=False
     if sig!=_RULE_SIG or run(['nft','list','table','inet','quotagate']).returncode:ensure_firewall(c);_RULE_SIG=sig;_BLOCK_SIG=None;rebuilt=True
     bsig=tuple(sorted(set(blocked_ips)))
     if bsig!=_BLOCK_SIG:
