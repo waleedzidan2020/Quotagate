@@ -12,8 +12,34 @@
     const info=document.createElement('div');
     info.id='dnsEnforcementInfo';
     info.className='notice';
-    info.innerHTML='<b>DNS Enforcement: ON</b><br><small>اكتب الدومين فقط مثل youtube.com. يتم حجب الدومين وكل Subdomains، ويتم إجبار DNS العادي TCP/UDP 53 على المرور عبر QuotaGate مع منع DNS-over-TLS على 853. اختيار جهاز يطبق القاعدة على هذا الجهاز فقط.</small>';
+    info.innerHTML='<b id="dnsRuntimeStatus" class="muted">DNS Enforcement: checking...</b><br><small>اكتب الدومين فقط مثل youtube.com. يتم حجب الدومين وكل Subdomains، ويتم إجبار DNS العادي TCP/UDP 53 على المرور عبر QuotaGate مع منع DNS-over-TLS على 853. اختيار جهاز يطبق القاعدة على هذا الجهاز فقط.</small><br><small class="muted">ملاحظة: Secure DNS / DoH عبر HTTPS 443 لا يمكن ضمان منعه بالكامل بفلترة DNS فقط.</small>';
     card.appendChild(info);
+    loadDnsRuntimeStatus();
+  }
+
+  async function loadDnsRuntimeStatus(){
+    const box=$('dnsRuntimeStatus');
+    if(!box)return;
+    try{
+      const j=await api('/api/dns/status');
+      const e=j.enforcement||{};
+      if(j.ok){
+        box.textContent='DNS Enforcement: ACTIVE ✅ — UDP/TCP proxy + forced DNS' + (e.dot_block?' + DoT blocked':'');
+        box.className='ok';
+      }else{
+        const missing=[];
+        if(!j.proxy_udp)missing.push('UDP proxy');
+        if(!j.proxy_tcp)missing.push('TCP proxy');
+        if(e.enabled&&!e.udp53)missing.push('UDP/53 redirect');
+        if(e.enabled&&!e.tcp53)missing.push('TCP/53 redirect');
+        if(e.enabled&&!e.dot_block)missing.push('DoT block');
+        box.textContent='DNS Enforcement: ERROR ❌'+(missing.length?' — '+missing.join(', '):'');
+        box.className='bad';
+      }
+    }catch(e){
+      box.textContent='DNS Enforcement: status unavailable';
+      box.className='bad';
+    }
   }
 
   function targetOptions(){
@@ -111,7 +137,7 @@
   if(typeof originalRender==='function'){
     window.render=function(){
       const out=originalRender.apply(this,arguments);
-      setTimeout(()=>{installTargetPicker();targetOptions();},0);
+      setTimeout(()=>{installTargetPicker();targetOptions();loadDnsRuntimeStatus();},0);
       return out;
     };
   }
@@ -119,6 +145,7 @@
   function boot(){
     if(!installTargetPicker())return setTimeout(boot,60);
     targetOptions();
+    loadDnsRuntimeStatus();
     if(S)enhancedLoadDnsRules();
   }
   boot();
