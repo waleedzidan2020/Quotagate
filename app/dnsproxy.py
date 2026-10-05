@@ -172,7 +172,33 @@ def forward_udp(data,c,client_ip=''):
     return error_reply(data,2)
 
 
-def process_query(data,c,client_ip):
+def forward_tcp(data,c,client_ip=''):
+    errors=[]
+    for host in upstreams(c,client_ip):
+        s=None
+        try:
+            s=socket.create_connection((host,53),timeout=1.5)
+            s.settimeout(1.5)
+            s.sendall(struct.pack('!H',len(data))+data)
+            raw_len=_recv_exact(s,2)
+            if len(raw_len)!=2:raise RuntimeError('short DNS TCP length')
+            size=struct.unpack('!H',raw_len)[0]
+            if size<12 or size>65535:raise RuntimeError('invalid DNS TCP response length')
+            ans=_recv_exact(s,size)
+            if len(ans)==size:return ans
+            raise RuntimeError('short DNS TCP response')
+        except Exception as e:
+            errors.append(f'{host}: {e}')
+        finally:
+            try:
+                if s:s.close()
+            except Exception:pass
+    if errors:
+        _log_limited('dns-upstream-tcp','DNS TCP upstream failure; tried fallbacks: '+' | '.join(errors)[:1200])
+    return error_reply(data,2)
+
+
+def process_query(data,c,client_ip,transport='udp'):
     """Apply global/user/device policy and return (reply, domain, qtype, action)."""
     q=parse_query(data)
     if not q:return error_reply(data,1),'','','error'
@@ -184,7 +210,8 @@ def process_query(data,c,client_ip):
         return blocked_reply(data),domain,qt,'block'
     if chosen and chosen.get('action')=='redirect':
         return redirect_reply(data,chosen.get('target','')),domain,qt,'redirect'
-    return forward_udp(data,c,client_ip),domain,qt,'allow'
+    forward=forward_tcp if transport=='tcp' else forward_udp
+    return forward(data,c,client_ip),domain,qt,'allow'
 
 
 def _log_query(c,client_ip,domain,qt,action):
@@ -224,7 +251,7 @@ class TCPHandler(socketserver.BaseRequestHandler):
             if size<12 or size>65535:return
             data=_recv_exact(self.request,size)
             if len(data)!=size:return
-            ans,domain,qt,action=process_query(data,self.server.cfg,ip)
+            ans,domain,qt,action=process_query(data,self.server.cfg,ip,transport='tcp')
             self.request.sendall(struct.pack('!H',len(ans))+ans)
             _log_query(self.server.cfg,ip,domain,qt,action)
         except Exception as e:_log_limited('dns-tcp','DNS TCP handler failed: '+str(e)[:700])
