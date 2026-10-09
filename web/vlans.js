@@ -17,7 +17,7 @@ async function vlanLoad() {
         ' (VLAN ' + p.id + ')</h3><span class="pill ' + (active ? 'ok' : 'warn') +
         '">' + (active ? 'Running' : 'Not running') +
         '</span></div><div>Trunk: <code>' + esc(p.parent) +
-        '</code> → <code>' + esc(p.parent + '.' + p.id) +
+        '</code> → <code>' + esc('qgv' + p.id) +
         '</code> | Gateway: ' + esc(p.gateway) + '</div>' +
         '<small>DHCP: ' + esc(p.dhcp_start) + '–' + esc(p.dhcp_end) +
         ' | Wi-Fi: ' + (p.wifi_interface ? esc(p.ssid) + ' on ' + esc(p.wifi_interface) : 'external VLAN-aware AP / wired only') +
