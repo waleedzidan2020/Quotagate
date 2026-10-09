@@ -2,7 +2,7 @@
 <div id="login" class="center card login"><h1>QuotaGate 3.1</h1><p>لوحة إدارة الشبكة</p><input id="pw" type="password" placeholder="كلمة مرور المدير"><input id="totp" placeholder="رمز 2FA إن كان مفعلاً"><button onclick="login()">دخول</button><div id="loginErr" class="err"></div></div>
 <div id="app" hidden>
 <header><div><b>QuotaGate 3.1</b><small id="netTitle">192.168.2.1</small></div><div class="row"><span id="alertBadge" class="badge">0</span><button class="ghost" onclick="togglePrivacy()">👁 الخصوصية</button><button class="ghost" onclick="refreshAll()">تحديث</button></div></header>
-<nav id="tabs"><button data-tab="management" class="active">الإدارة</button><button data-tab="network">الشبكة</button><button data-tab="diagnostics">التشخيص</button><button data-tab="dns">DNS</button><button data-tab="history">السجل</button><button data-tab="firewall">Firewall</button><button data-tab="admin">Admin</button></nav>
+<nav id="tabs"><button data-tab="management" class="active">الإدارة</button><button data-tab="network">الشبكة</button><button data-tab="vlans">VLANs / الشبكات</button><button data-tab="diagnostics">التشخيص</button><button data-tab="dns">DNS</button><button data-tab="history">السجل</button><button data-tab="firewall">Firewall</button><button data-tab="admin">Admin</button></nav>
 <main>
 <section id="management" class="tab active">
 <div class="grid stats"><div class="card"><h3>الباقة</h3><div id="bundle"></div></div><div class="card"><h3>الأجهزة</h3><div id="devCount"></div></div><div class="card"><h3>الشبكة</h3><div id="networkMini"></div></div></div>
@@ -10,6 +10,16 @@
 <div id="users"></div><h2>أجهزة غير مخصصة</h2><div id="devices" class="grid"></div>
 </section>
 
+<section id="vlans" class="tab">
+<div class="card">
+<h2>VLAN Management — إدارة الشبكات</h2>
+<p class="muted">إنشاء شبكات VLAN مع DHCP مستقل، وإمكانية ربط SSID بكارت Wi-Fi إضافي مستقل. لا تستخدم eth0 (الإنترنت) أو wlan0 (الشبكة الأساسية) كواجهة trunk.</p>
+<div class="notice warnbox"><b>قبل التطبيق:</b> احفظ Backup، واستخدم Ethernet إضافي موصول بسويتش أو Access Point يدعم 802.1Q. كارت BCM4318 الحالي لا يعلن دعم تشغيل شبكتين SSID معًا. حفظ الإعدادات لا يشغّل VLAN حتى تضغط تطبيق.</div>
+<div class="toolbar"><button onclick="vlanAdd()">+ شبكة VLAN</button><button class="ghost" onclick="vlanLoad()">تحديث</button><button class="warn" onclick="vlanApply()">تطبيق VLANs المحفوظة</button></div>
+<div id="vlanState" class="muted">جاري قراءة إعدادات VLAN...</div>
+<div id="vlanProfiles"></div>
+</div>
+</section>
 <section id="network" class="tab"><div class="grid">
 <div class="card"><h3>إعدادات Wi-Fi</h3><div class="row"><span class="pill" id="wifiState">الحالة</span><span class="pill" id="wifiPasswordState">كلمة المرور</span></div><label>اسم الشبكة / SSID<input id="wifiSsid" maxlength="32" autocomplete="off"></label><label>كلمة مرور Wi-Fi<input id="wifiPassword" type="password" minlength="8" maxlength="63" autocomplete="new-password" placeholder="اتركها فارغة للاحتفاظ بالحالية"></label><small>لن يتم عرض كلمة المرور المحفوظة.</small><label>Channel<select id="wifiChannel"><option>1</option><option>6</option><option>11</option></select></label><label><input id="wifiHidden" type="checkbox"> إخفاء اسم الشبكة</label><div class="notice warnbox"><small>تغيير SSID أو كلمة المرور أو الإخفاء سيعيد تشغيل hostapd فقط وقد يفصل الأجهزة لثوانٍ.</small></div><button onclick="saveWifi()">حفظ Wi-Fi</button></div>
 <div class="card"><h3>إعدادات الباقة</h3><label>إجمالي GB<input id="bundleGb" type="number" step="0.1" min="0"></label><label>نوع التجديد<select id="bundleType"><option value="renew_day">يوم محدد</option><option value="end_of_month">نهاية الشهر</option></select></label><label>يوم التجديد<input id="resetDay" type="number" min="1" max="28"></label><label><input id="autoReset" type="checkbox"> تجديد تلقائي</label><button onclick="saveNetwork()">حفظ الباقة</button></div>
