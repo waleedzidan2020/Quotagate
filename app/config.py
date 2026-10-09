@@ -10,6 +10,7 @@ DEFAULT={
    'line_down_mbit':12.0,'line_up_mbit':1.5,'vpn_share':False,'vpn_interface':'tun0','vpn_auto_detect':True,'dmz_ip':'',
    'stop_new_connections':False,'decline_random_macs':False,'default_new_enabled':False
  },
+ 'vlans':{'profiles':[]},
  'wifi':{'enabled':True,'ssid':'QuotaGate','passphrase':'','channel':1,'hw_mode':'g','hidden':False},
  'web':{'host':'192.168.2.1','port':8080,'https':False,'cert':'/etc/quotagate/tls.crt','key':'/etc/quotagate/tls.key'},
  'bundle':{'total_gb':140.0,'reset_day':1,'bundle_type':'renew_day','auto_reset':True,'last_reset_period':''},
