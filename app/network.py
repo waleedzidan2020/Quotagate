@@ -239,6 +239,9 @@ def rebuild_rules(c,devices):
         run(['nft','add','rule','inet','quotagate','forward','ip','saddr',ip,'ip','daddr','!=',net,'ip','daddr','!=',uplink,'counter','comment',f"qg:{d['id']}:up"]);run(['nft','add','rule','inet','quotagate','forward','ip','daddr',ip,'ip','saddr','!=',net,'ip','saddr','!=',uplink,'counter','comment',f"qg:{d['id']}:down"])
     run(['nft','add','rule','inet','quotagate','forward','ip','saddr','@blocked_v4','drop']);run(['nft','add','rule','inet','quotagate','forward','ip','daddr','@blocked_v4','drop'])
     for cmd in dns_dot_block_commands(c):run(cmd,True)
+    # VLAN isolation precedes any user-defined accept or established rules.
+    from . import vlans
+    vlans.forward_rules(run,c)
     for r in db.firewall_rules():
         if not r['enabled'] or r['direction']!='forward':continue
         if not _valid_ip_or_net(r['src']) or not _valid_ip_or_net(r['dst']) or not _valid_port(r['sport']) or not _valid_port(r['dport']):continue
