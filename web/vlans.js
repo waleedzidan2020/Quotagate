@@ -9,7 +9,7 @@ async function vlanLoad() {
     VLAN_ITEMS = data.profiles || [];
     VLAN_ACTIVE = data.active_vlan_ids || [];
     state.textContent = 'VLANs running: ' + (VLAN_ACTIVE.join(', ') || 'none') +
-      ' — enabled is not the same as applied.';
+      ' — Available interfaces: ' + (data.interfaces || []).join(', ') + '. Enabled is not the same as applied.';
     const box = document.getElementById('vlanProfiles');
     box.innerHTML = VLAN_ITEMS.map(function(p) {
       const active = VLAN_ACTIVE.includes(p.id);
