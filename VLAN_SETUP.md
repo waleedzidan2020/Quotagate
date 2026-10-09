@@ -15,10 +15,10 @@ It will reject eth0, wlan0, VPN interfaces and overlapping IPv4 /24 subnets.
 * eth0 = untagged WAN from Huawei (192.168.1.x), **do not select as VLAN trunk**.
 * wlan0 = existing QuotaGate SSID/subnet (192.168.2.1/24).
 * eth1 = new physical port to a managed switch or VLAN-aware AP (tagged trunk).
-* eth1.20 = VLAN 20; 192.168.20.1/24; DHCP 192.168.20.100–200.
-* Optional wlan1 = independent Wi-Fi adapter. QuotaGate runs its own hostapd on wlan1, connects the BSS to qgbr20 and bridges eth1.20 into qgbr20. The gateway and VLAN DHCP server bind to qgbr20.
+* qgv20 = VLAN 20; 192.168.20.1/24; DHCP 192.168.20.100–200.
+* Optional wlan1 = independent Wi-Fi adapter. QuotaGate runs its own hostapd on wlan1, connects the BSS to qgbr20 and bridges qgv20 into qgbr20. The gateway and VLAN DHCP server bind to qgbr20.
 
-**Important:** if using a switch/AP, configure its trunk ports and SSID VLAN tagging independently. Creating eth1.20 on Linux alone does not configure the physical switch, and the WAN Huawei HG630V2 is not assumed to support it.
+**Important:** if using a switch/AP, configure its trunk ports and SSID VLAN tagging independently. Creating qgv20 on Linux alone does not configure the physical switch, and the WAN Huawei HG630V2 is not assumed to support it.
 
 ## Dashboard
 
@@ -34,7 +34,7 @@ Read-only checks:
 
     ip -br link
     iw dev
-    ip -d link show eth1.20
+    ip -d link show qgv20
     sudo nft list chain inet quotagate forward
     sudo nft list chain inet quotagate input
     sudo nft list table ip qg_vlan_nat
