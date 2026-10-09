@@ -89,7 +89,7 @@ jobs:
           print('live usage accounting: OK')
           PY
       - name: VLAN smoke tests
-        run: python3 tests/vlan_smoke.py
+        run: PYTHONPATH=. python3 tests/vlan_smoke.py
       - name: JavaScript syntax
         run: |
           node --check web/app.js
