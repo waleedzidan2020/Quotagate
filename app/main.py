@@ -4,7 +4,7 @@ from http.cookies import SimpleCookie
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
-from . import auth, config, db, network, diagnostics, usage_tracker, maintenance, gaming, qos_priority, system_power, domainblock, static_ip
+from . import auth, config, db, network, diagnostics, usage_tracker, maintenance, gaming, qos_priority, system_power, domainblock, static_ip, vlans
 from .dnsproxy import DNSProxy, rule_patterns, rule_matches
 
 ROOT=Path(__file__).resolve().parent.parent; WEB=ROOT/'web'; LOCK=threading.RLock(); SESSIONS={}; FAILS={}; BANS={}; REQS={}; DNS=None
@@ -29,7 +29,7 @@ def request_allowed(ip,limit=240,window=60):
     arr.append(now);REQS[ip]=arr;return True
 
 def mask_config(c):
-    x=json.loads(json.dumps(c));x['admin']['password_hash']='***';x['admin']['totp_secret']='***';x['wan']['pppoe_password']='***';password_set=bool(x['wifi'].pop('passphrase',''));x['wifi']['password_set']=password_set;return x
+    x=json.loads(json.dumps(c));x['admin']['password_hash']='***';x['admin']['totp_secret']='***';x['wan']['pppoe_password']='***';password_set=bool(x['wifi'].pop('passphrase',''));x['wifi']['password_set']=password_set;x['vlans']={'profiles':vlans.public_profiles(c)};return x
 def wifi_view(c):
     w=c['wifi'];return {'ssid':w.get('ssid',''),'hidden':bool(w.get('hidden',False)),'password_set':bool(w.get('passphrase','')),'channel':int(w.get('channel',1))}
 def restart_wifi_after_save(c):
@@ -197,6 +197,7 @@ class Handler(SimpleHTTPRequestHandler):
         if p=='/api/status':
             us=quota_view(c,db.users());ds=db.devices();gu=db.gateway_usage();gateway_bytes=int(gu.get('up_bytes',0))+int(gu.get('down_bytes',0));used=gateway_bytes
             return self.json({'users':us,'devices':ds,'events':db.events(80),'alerts':db.alerts(50),'daily':usage_tracker.daily_history(),'bundle':{**c['bundle'],'used_bytes':used,'gateway_bytes':gateway_bytes},'network':c['network'],'wifi':wifi_view(c),'web':c['web'],'mac_rules':db.mac_rules(),'system':system_info(c),'dns':c.get('dns',{}),'updates':{k:v for k,v in c.get('updates',{}).items() if k!='repo'}})
+        if p=='/api/vlans':return self.json(vlans.status(c))
         if p=='/api/dns/status':return self.json(dns_runtime_status(c))
         if p=='/api/device/static-ip/status':
             did=int((q.get('device_id') or ['0'])[0])
@@ -301,6 +302,28 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.json({'ok':True})
             if p=='/api/policy/apply':apply(c);return self.json({'ok':True})
             if p=='/api/reset-month':db.reset_month();return self.json({'ok':True})
+            if p=='/api/vlans/save':
+                profiles=d.get('profiles')
+                if not isinstance(profiles,list):raise ValueError('profiles list required')
+                old={int(x['id']):x for x in c.get('vlans',{}).get('profiles',[])}
+                updated=[]
+                for p0 in profiles:
+                    if not isinstance(p0,dict):raise ValueError('invalid VLAN profile')
+                    item=dict(p0)
+                    try:prev=old.get(int(item.get('id',0)))
+                    except (TypeError,ValueError):prev=None
+                    if (prev and not item.get('wifi_password') and
+                            item.get('wifi_interface')==prev.get('wifi_interface')):
+                        item['wifi_password']=prev.get('wifi_password','')
+                    updated.append(item)
+                checked=vlans.validate(c,updated)
+                c['vlans']={'profiles':checked};config.save(c)
+                return self.json({'ok':True,'profiles':vlans.public_profiles(c),'apply_required':True})
+            if p=='/api/vlans/apply':
+                r=vlans.apply(c)
+                network.rebuild_rules(c,db.devices())
+                db.event('VLAN configuration applied: '+','.join(map(str,r['active_vlan_ids'])),'info')
+                return self.json(r)
             if p=='/api/settings':
                 for sec in ('bundle','network','guest','features','security','usage'):
                     if sec in d and isinstance(d[sec],dict):c[sec].update(d[sec])
@@ -377,6 +400,8 @@ def main():
     db.init();c=config.load();gaming.tick(c)
     try:network.runtime(c);network.start_network_daemons(c)
     except Exception as e:db.event('network startup: '+str(e),'error')
+    try:vlans.apply(c)
+    except Exception as e:db.event('VLAN startup: '+str(e),'error')
     try:apply(c)
     except Exception as e:db.event('policy startup: '+str(e),'error')
     try:
