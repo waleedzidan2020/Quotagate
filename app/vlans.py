@@ -271,6 +271,12 @@ def apply(c):
         return {"ok": True, "active_vlan_ids": [p["id"] for p in enabled]}
 
 
+def stop_runtime():
+    """Remove only VLAN interfaces and daemons recorded as owned by QuotaGate."""
+    with LOCK:
+        _stop_owned()
+
+
 def forward_rules(run, c):
     """Add before generic policy/established accepts in QuotaGate's forward chain."""
     n = c["network"]
