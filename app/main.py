@@ -320,8 +320,14 @@ class Handler(SimpleHTTPRequestHandler):
                 c['vlans']={'profiles':checked};config.save(c)
                 return self.json({'ok':True,'profiles':vlans.public_profiles(c),'apply_required':True})
             if p=='/api/vlans/apply':
-                r=vlans.apply(c)
-                network.rebuild_rules(c,db.devices())
+                try:
+                    r=vlans.apply(c)
+                    network.rebuild_rules(c,db.devices())
+                except Exception:
+                    vlans.stop_runtime()
+                    try:network.rebuild_rules(c,db.devices())
+                    except Exception:pass
+                    raise
                 db.event('VLAN configuration applied: '+','.join(map(str,r['active_vlan_ids'])),'info')
                 return self.json(r)
             if p=='/api/settings':
@@ -403,7 +409,11 @@ def main():
     try:vlans.apply(c)
     except Exception as e:db.event('VLAN startup: '+str(e),'error')
     try:apply(c)
-    except Exception as e:db.event('policy startup: '+str(e),'error')
+    except Exception as e:
+        if vlans.status(c)['active_vlan_ids']:
+            try:vlans.stop_runtime()
+            except Exception:pass
+        db.event('policy startup: '+str(e),'error')
     try:
         domainblock.sync(c,force=True)
         for rule in db.dns_rules():
