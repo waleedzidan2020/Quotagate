@@ -88,9 +88,12 @@ jobs:
           assert db.day(a)=='2026-09-07';assert db.day(b)=='2026-09-08'
           print('live usage accounting: OK')
           PY
+      - name: VLAN smoke tests
+        run: python3 tests/vlan_smoke.py
       - name: JavaScript syntax
         run: |
           node --check web/app.js
+          node --check web/vlans.js
           node --check web/app-core.js
           node --check web/speed-toggle.js
           node --check web/guest-mode.js
