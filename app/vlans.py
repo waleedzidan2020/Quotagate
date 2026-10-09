@@ -131,6 +131,7 @@ def preflight(c, profiles, owned=()):
     available = _interfaces()
     radios = _radio_map()
     primary_radio = radios.get(c["network"]["lan_interface"])
+    vlan_radios = set()
     for p in profiles:
         if not p["enabled"]:
             continue
@@ -144,8 +145,13 @@ def preflight(c, profiles, owned=()):
         if wifi:
             if wifi not in available or wifi not in radios:
                 raise RuntimeError("dedicated Wi-Fi AP not found: " + wifi)
-            if radios[wifi] == primary_radio:
-                raise RuntimeError("Wi-Fi interface shares primary radio; multiple SSIDs not supported safely")
+            if radios[wifi] == primary_radio or radios[wifi] in vlan_radios:
+                raise RuntimeError("Wi-Fi interface shares another AP radio; multiple SSIDs not supported safely")
+            vlan_radios.add(radios[wifi])
+            phy = "phy" + radios[wifi].split("#")[-1]
+            info = _run(["iw", "phy", phy, "info"], check=False)
+            if info.returncode or not re.search(r"^\s*\* AP\s*$", info.stdout, re.MULTILINE):
+                raise RuntimeError("extra Wi-Fi radio lacks supported AP mode: " + wifi)
             a = _run(["ip", "-4", "-o", "addr", "show", "dev", wifi], check=False)
             if a.stdout.strip():
                 raise RuntimeError("Wi-Fi interface has an IP; dedicate it to QuotaGate first")
@@ -274,7 +280,11 @@ def forward_rules(run, c):
     profiles = _state()
     for p in profiles:
         iface = "qgbr" + str(p["id"]) if p.get("wifi") else p["iface"]
-        for subnet in (uplink, primary):
+        # Deny access to private/internal destinations even when the WAN router
+        # can route beyond its directly connected subnet.
+        for subnet in (uplink, primary, "10.0.0.0/8", "172.16.0.0/12",
+                       "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16",
+                       "127.0.0.0/8"):
             run(["nft", "add", "rule", "inet", "quotagate", "forward", "iifname", iface,
                  "ip", "daddr", subnet, "drop"])
         for other in profiles:
