@@ -241,7 +241,7 @@ def rebuild_rules(c,devices):
     for cmd in dns_dot_block_commands(c):run(cmd,True)
     # VLAN isolation precedes any user-defined accept or established rules.
     from . import vlans
-    vlans.forward_rules(run,c)
+    vlans.forward_rules(lambda cmd:run(cmd,True),c)
     for r in db.firewall_rules():
         if not r['enabled'] or r['direction']!='forward':continue
         if not _valid_ip_or_net(r['src']) or not _valid_ip_or_net(r['dst']) or not _valid_port(r['sport']) or not _valid_port(r['dport']):continue
