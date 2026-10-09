@@ -127,7 +127,7 @@ def _radio_map():
     return mapping
 
 
-def preflight(c, profiles):
+def preflight(c, profiles, owned=()):
     available = _interfaces()
     radios = _radio_map()
     primary_radio = radios.get(c["network"]["lan_interface"])
@@ -139,7 +139,7 @@ def preflight(c, profiles):
             raise RuntimeError("VLAN trunk not found: " + parent)
         iface = parent + "." + str(p["id"])
         bridge = "qgbr" + str(p["id"])
-        if iface in available or (wifi and bridge in available):
+        if (iface in available and iface not in owned) or (wifi and bridge in available and bridge not in owned):
             raise RuntimeError("VLAN interface already exists outside QuotaGate: " + iface)
         if wifi:
             if wifi not in available or wifi not in radios:
@@ -196,8 +196,9 @@ def _start_one(p, state):
     iface = p["parent"] + "." + str(vid)
     wifi = p["wifi_interface"]
     l3 = "qgbr" + str(vid) if wifi else iface
+    _run(["modprobe", "8021q"])
     _run(["ip", "link", "add", "link", p["parent"], "name", iface, "type", "vlan", "id", str(vid)])
-    state.append({"id": vid, "iface": iface, "wifi": wifi})
+    state.append({"id": vid, "iface": iface, "wifi": wifi, "gateway": p["gateway"]})
     _save_state(state)
     _run(["ip", "link", "set", "dev", iface, "up"])
     if wifi:
@@ -248,19 +249,10 @@ def apply(c):
     with LOCK:
         profiles = validate(c, c.get("vlans", {}).get("profiles", []))
         enabled = [p for p in profiles if p["enabled"]]
-        # Preflight BEFORE stopping anything. Owned existing interfaces will be
-        # removed on re-apply, so they are not conflicts.
+        # Preflight before stopping existing VLAN services; ignore only our own interfaces.
         owned = {x["iface"] for x in _state()}
         owned.update("qgbr" + str(x["id"]) for x in _state() if x.get("wifi"))
-        available = _interfaces() - owned
-        preflight(c, [{**p, "enabled": p["enabled"]} for p in profiles]
-                  if not owned else [{**p, "enabled": False} for p in profiles])
-        if owned:
-            for p in enabled:
-                if p["parent"] not in _interfaces():
-                    raise RuntimeError("trunk unavailable: " + p["parent"])
-                if p["wifi_interface"] and p["wifi_interface"] not in _interfaces():
-                    raise RuntimeError("Wi-Fi interface unavailable: " + p["wifi_interface"])
+        preflight(c, profiles, owned)
         _stop_owned()
         state = []
         try:
@@ -277,9 +269,11 @@ def forward_rules(run, c):
     """Add before generic policy/established accepts in QuotaGate's forward chain."""
     n = c["network"]
     wan, uplink, primary = n["wan_interface"], n["uplink_net"], n["client_net"]
-    profiles = [p for p in c.get("vlans", {}).get("profiles", []) if p.get("enabled")]
+    # Use RUNNING state, not un-applied drafts; saving a profile must never
+    # weaken firewall isolation of an already active VLAN.
+    profiles = _state()
     for p in profiles:
-        iface = "qgbr" + str(p["id"]) if p.get("wifi_interface") else p["parent"] + "." + str(p["id"])
+        iface = "qgbr" + str(p["id"]) if p.get("wifi") else p["iface"]
         for subnet in (uplink, primary):
             run(["nft", "add", "rule", "inet", "quotagate", "forward", "iifname", iface,
                  "ip", "daddr", subnet, "drop"])
@@ -288,7 +282,12 @@ def forward_rules(run, c):
                 target = str(ipaddress.ip_interface(other["gateway"]).network)
                 run(["nft", "add", "rule", "inet", "quotagate", "forward", "iifname", iface,
                      "ip", "daddr", target, "drop"])
-        # No IPv6 routing or implicit access to the gateway.
+        # Permit DHCP to this VLAN gateway, but deny access to the server itself.
+        run(["nft", "add", "rule", "inet", "quotagate", "input", "iifname", iface,
+             "udp", "dport", "67", "accept"])
+        run(["nft", "add", "rule", "inet", "quotagate", "input", "iifname", iface,
+             "drop"])
+        # No IPv6 routing to other networks.
         run(["nft", "add", "rule", "inet", "quotagate", "forward", "iifname", iface,
              "meta", "nfproto", "ipv6", "drop"])
         subnet = str(ipaddress.ip_interface(p["gateway"]).network)
