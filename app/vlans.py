@@ -60,9 +60,9 @@ def validate(c, profiles):
         parent = str(raw.get("parent", "")).strip()
         if not IFACE.fullmatch(parent) or parent in primary or parent.startswith("qgbr"):
             raise ValueError("use a dedicated VLAN trunk interface, NOT WAN/primary Wi-Fi/VPN")
-        vlan_iface = parent + "." + str(vid)
-        if len(vlan_iface) > 15:
-            raise ValueError("VLAN interface name exceeds Linux 15-character limit")
+        # Linux interface names max out at 15 chars; USB NIC names (enx...)
+        # can already be 15 characters, so use our own short VLAN name.
+        vlan_iface = "qgv" + str(vid)
         try:
             ip = ipaddress.ip_interface(str(raw.get("gateway", "")))
         except ValueError:
@@ -138,7 +138,7 @@ def preflight(c, profiles, owned=()):
         parent, wifi = p["parent"], p["wifi_interface"]
         if parent not in available:
             raise RuntimeError("VLAN trunk not found: " + parent)
-        iface = parent + "." + str(p["id"])
+        iface = "qgv" + str(p["id"])
         bridge = "qgbr" + str(p["id"])
         if (iface in available and iface not in owned) or (wifi and bridge in available and bridge not in owned):
             raise RuntimeError("VLAN interface already exists outside QuotaGate: " + iface)
@@ -199,7 +199,7 @@ def _stop_owned():
 
 def _start_one(p, state):
     vid = p["id"]
-    iface = p["parent"] + "." + str(vid)
+    iface = "qgv" + str(vid)
     wifi = p["wifi_interface"]
     l3 = "qgbr" + str(vid) if wifi else iface
     _run(["modprobe", "8021q"])
@@ -314,5 +314,5 @@ def forward_rules(run, c):
 def status(c):
     ids = {x["id"] for x in _state()}
     return {"profiles": public_profiles(c),
-            "active_vlan_ids": sorted(ids),
+            "active_vlan_ids": sorted(x["id"] for x in _state() if x["iface"] in _interfaces()),
             "interfaces": sorted(_interfaces())}
