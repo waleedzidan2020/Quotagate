@@ -46,13 +46,13 @@ with patch.object(vlans, "_interfaces", return_value={"eth0", "eth1", "wlan0", "
         raise AssertionError("same radio should be refused")
 
 rules = []
-running = [{"id": 20, "iface": "eth1.20", "wifi": "", "gateway": "192.168.20.1/24"}]
+running = [{"id": 20, "iface": "qgv20", "wifi": "", "gateway": "192.168.20.1/24"}]
 with patch.object(vlans, "_state", return_value=running):
     vlans.forward_rules(lambda cmd: rules.append(cmd), C)
 text = [" ".join(x) for x in rules]
 assert any("ip daddr 192.168.1.0/24 drop" in x for x in text)
 assert any("ip daddr 192.168.2.0/24 drop" in x for x in text)
-assert any("input iifname eth1.20 drop" in x for x in text)
+assert any("input iifname qgv20 drop" in x for x in text)
 assert any("oifname eth0 ip saddr 192.168.20.0/24 accept" in x for x in text)
 assert not any("wifi_password" in x for x in text)
 with patch.object(vlans, "_state", return_value=[]):
